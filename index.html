@@ -8,7 +8,7 @@
 <meta name="theme-color" content="#0E1117">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Director">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png" type="image/png">
@@ -28,7 +28,7 @@
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-html, body { height: 100%; margin: 0; background: var(--bg); overscroll-behavior: none; }
+html, body { height: 100%; margin: 0; background: var(--bg); overscroll-behavior: none; overflow: hidden; }
 body { color: var(--ink); font-family: var(--body); font-size: 15px; line-height: 1.4; -webkit-tap-highlight-color: transparent; }
 html { touch-action: manipulation; -webkit-text-size-adjust: 100%; }
 button { cursor: pointer; touch-action: manipulation; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
@@ -301,7 +301,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "23";
+const APP_VERSION = "24";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
