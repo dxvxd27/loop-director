@@ -275,7 +275,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "16";
+const APP_VERSION = "17";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -437,7 +437,13 @@ const Store = {
     this.lastSync = null; this.error = null; this.persist(); setSync();
     await this.sync();
   },
-  signOut() { this.session = null; this.lastSync = null; this.error = null; this.church = { owner: null, email: "", songs: [], cues: [], last: null }; this.persist(); this.emit("songs"); setSync(); },
+  // Signing out also clears this device's copy (it lives in the account), so another account never mixes with it.
+  signOut() {
+    this.session = null; this.lastSync = null; this.error = null; this.pending = {};
+    this.songs = []; this.setlists = []; this.cues = []; this.config = null;
+    this.church = { owner: null, email: "", songs: [], cues: [], last: null };
+    this.persist(); ["songs", "setlists", "cues", "config"].forEach(k => this.emit(k)); setSync();
+  },
   uid() { try { return JSON.parse(atob(this.session.access.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))).sub; } catch { return null; } },
   async token() {
     if (!this.session) return null;
@@ -1507,7 +1513,11 @@ document.addEventListener("click", async e => {
     case "account": UI.account = true; renderAccount(); break;
     case "close-sheet": case "close-sheet-btn": UI.account = false; $("#sheet-root").innerHTML = ""; break;
     case "sync-now": Store.sync(); break;
-    case "logout": Store.signOut(); UI.account = false; $("#sheet-root").innerHTML = ""; break;
+    case "logout": {
+      const n = Object.keys(Store.pending).length;
+      if (!confirm(n ? `Hay ${n} cambio${n > 1 ? "s" : ""} sin subir todavía y se perderán. ¿Cerrar sesión igualmente?` : "Al cerrar sesión se quitan de este dispositivo las canciones de esta cuenta (siguen guardadas en la cuenta). ¿Cerrar sesión?")) break;
+      L.setId = null; Store.signOut(); shareList = null;
+    } UI.account = false; $("#sheet-root").innerHTML = ""; break;
     // live
     case "play": if (L.playing) stop(false); else start(); break;
     case "pad": jumpTo(+el.dataset.i); break;
