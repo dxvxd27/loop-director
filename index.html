@@ -163,6 +163,30 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 .stepper input { text-align: center; padding: 7px 2px; }
 .ctr { display: flex; gap: 4px; }
 .add-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.add-chips button[aria-pressed="true"] { background: var(--c); color: #0B0D12; border-color: var(--c); }
+/* Song structure: one block per section, width = bars. Drag the right edge to change the bars. */
+.arr-wrap { overflow-x: auto; overflow-y: hidden; padding: 2px 0 8px; -webkit-overflow-scrolling: touch; }
+.arr { position: relative; width: max-content; min-width: 100%; }
+.ruler { position: relative; height: 18px; }
+.ruler span { position: absolute; top: 0; padding-left: 3px; border-left: 1px solid var(--line); font-family: var(--mono); font-size: 11px; color: var(--muted); line-height: 16px; }
+.arr-row { display: flex; height: 104px; }
+.ablk { position: relative; flex: none; height: 100%; border: 0; border-radius: 10px; padding: 7px 30px 7px 9px; text-align: left; overflow: hidden;
+  background: color-mix(in srgb, var(--c) 24%, var(--surface)); box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--c) 55%, transparent); }
+.ablk .ticks { position: absolute; inset: 0; pointer-events: none;
+  background-image: linear-gradient(to right, color-mix(in srgb, var(--c) 85%, transparent) 2px, transparent 2px), linear-gradient(to right, color-mix(in srgb, var(--c) 38%, transparent) 1px, transparent 1px);
+  background-size: calc(var(--ppb) * 4) 100%, var(--ppb) 100%; }
+.ablk .nm { position: relative; display: block; font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ablk .n { position: absolute; left: 9px; bottom: 6px; font-family: var(--display); font-size: 30px; font-weight: 800; line-height: 1; white-space: nowrap; }
+.ablk .n small { font-family: var(--body); font-size: 12px; font-weight: 600; color: var(--muted); margin-left: 3px; }
+.ablk.sel { background: color-mix(in srgb, var(--c) 42%, var(--surface)); box-shadow: inset 0 0 0 3px var(--ink); }
+.ablk.dragging { box-shadow: inset 0 0 0 3px var(--led); }
+.grip { position: absolute; right: 0; top: 0; bottom: 0; width: 28px; touch-action: none; cursor: ew-resize; display: grid; place-items: center; background: color-mix(in srgb, var(--c) 50%, transparent); }
+.grip::after { content: ""; width: 10px; height: 36px; border-left: 3px solid var(--ink); border-right: 3px solid var(--ink); border-radius: 2px; opacity: .8; }
+.arr-empty { height: 104px; display: grid; place-items: center; border: 2px dashed var(--line); border-radius: 12px; color: var(--muted); }
+.insp { border-left: 6px solid var(--c); }
+.insp .big { font-family: var(--display); font-size: 40px; font-weight: 800; line-height: 1; min-width: 56px; text-align: center; font-variant-numeric: tabular-nums; }
+.insp .quick button { min-width: 48px; }
+.insp .quick button[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .add-chips button { border: 1px solid color-mix(in srgb, var(--c) 60%, var(--line)); background: color-mix(in srgb, var(--c) 16%, var(--surface)); border-radius: 999px; padding: 7px 12px; font-weight: 600; font-size: 13px; }
 .set-item { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); background: var(--surface-2); border-radius: 12px; }
 .set-item .n { font-family: var(--mono); color: var(--muted); font-size: 13px; text-align: right; }
@@ -222,7 +246,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "2";
+const APP_VERSION = "3";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -730,7 +754,7 @@ function setMode(m) { setCfg({ mode: m }); if (L.pending) L.pending.mode = m; }
 /* ---------- UI state ---------- */
 const UI = { tab: "live", songId: null, setId: null, account: false, songQ: "", addQ: "" };
 function switchTab(t) {
-  UI.tab = t;
+  UI.tab = t; $("#view").dataset.song = "";
   document.querySelectorAll("nav.tabs button").forEach(b => b.setAttribute("aria-current", b.dataset.tab === t ? "page" : "false"));
   render();
 }
@@ -946,17 +970,40 @@ function renderSongs() {
     const secs = song.sections || [];
     const kindOpts = sel => KINDS.map(k => `<option value="${k.k}" ${k.k === sel ? "selected" : ""}>${esc(k.name)}</option>`).join("");
     const beatOpts = (sel, blank) => (blank ? `<option value="">—</option>` : "") + Array.from({ length: 12 }, (_, i) => i + 1).map(n => `<option value="${n}" ${n === +sel ? "selected" : ""}>${n}</option>`).join("");
-    const rows = secs.map((s, i) => `<div class="secrow" data-i="${i}" style="--c:${kindOf(s.kind).c}">
-        <span class="sw"></span>
-        <select data-f="kind" aria-label="Tipo de sección">${kindOpts(s.kind)}</select>
-        <input type="text" data-f="label" value="${esc(s.label || "")}" placeholder="${esc(secLabel({ ...song, sections: secs.map((x, j) => j === i ? { ...x, label: "" } : x) }, i))}" aria-label="Nombre (opcional)">
-        <div class="stepper"><button class="icon-btn" data-act="bars" data-d="-1" aria-label="Menos compases">−</button><input type="number" inputmode="numeric" min="1" max="256" data-f="bars" value="${s.bars || 1}" aria-label="Compases"><button class="icon-btn" data-act="bars" data-d="1" aria-label="Más compases">+</button></div>
-        <input type="number" inputmode="numeric" min="20" max="300" data-f="bpm" value="${s.bpm || ""}" placeholder="${num(song.bpm, 120)}" aria-label="Tempo de la sección">
-        <select data-f="beats" aria-label="Tiempos por compás">${beatOpts(s.beats || "", true)}</select>
-        <div class="ctr"><button class="icon-btn" data-act="sec-up" ${i === 0 ? "disabled" : ""} aria-label="Subir">↑</button><button class="icon-btn" data-act="sec-down" ${i === secs.length - 1 ? "disabled" : ""} aria-label="Bajar">↓</button><button class="icon-btn" data-act="sec-dup" aria-label="Duplicar">⧉</button><button class="icon-btn" data-act="sec-del" aria-label="Quitar">✕</button></div>
-      </div>`).join("");
+    const full = { ...song, sections: secs.map(x => ({ ...x, bars: x.bars || 1 })) };
+    const totalBars = full.sections.reduce((a, s) => a + s.bars, 0);
+    if (UI.selSec == null || UI.selSec >= secs.length) UI.selSec = secs.length ? 0 : null;
+    // Bar width: fit the song in the pane when possible, but never so thin that a bar cannot be told apart.
+    const avail = window.innerWidth > 860 ? window.innerWidth - 400 : window.innerWidth - 70;
+    const ppb = UI.ppb = clamp(Math.floor(avail / Math.max(totalBars + 4, 24)), 24, 56);
+    const ruler = Array.from({ length: Math.ceil((totalBars + 1) / 4) }, (_, k) => `<span style="left:${k * 4 * ppb}px">${k * 4 + 1}</span>`).join("");
+    const blocks = full.sections.map((s, i) => `<div class="ablk ${i === UI.selSec ? "sel" : ""}" data-act="sel-sec" data-i="${i}" style="width:${s.bars * ppb}px;--c:${kindOf(s.kind).c}" role="button" aria-label="${esc(secLabel(full, i))}, ${s.bars} compases">
+        <i class="ticks"></i><span class="nm">${esc(secLabel(full, i))}</span><span class="n">${s.bars}<small>${s.bars === 1 ? "compás" : "comp."}</small></span>
+        <span class="grip" data-grip="${i}" aria-hidden="true"></span></div>`).join("");
     const chips = KINDS.map(k => `<button data-act="add-sec" data-k="${k.k}" style="--c:${k.c}">+ ${esc(k.name)}</button>`).join("");
-    const totalBars = secs.reduce((a, s) => a + (s.bars || 1), 0);
+    let insp = "";
+    if (UI.selSec != null) {
+      const i = UI.selSec, s = full.sections[i], kd = kindOf(s.kind), p = secParams(full, i);
+      const startBar = full.sections.slice(0, i).reduce((a, x) => a + x.bars, 0) + 1;
+      insp = `<div class="card insp" data-i="${i}" style="--c:${kd.c}">
+        <div class="row"><h3 class="grow" style="color:var(--ink);font-size:15px;letter-spacing:.02em;text-transform:none">${esc(secLabel(full, i))} <span class="muted" style="font-weight:500">· compases ${startBar}–${startBar + s.bars - 1} · ${fmtDur(s.bars * p.beats * 60 / p.bpm)}</span></h3></div>
+        <div class="row">
+          <button class="icon-btn" style="width:48px;height:48px;font-size:22px" data-act="bars" data-d="-1" aria-label="Un compás menos">−</button>
+          <span class="big" aria-live="polite">${s.bars}</span>
+          <button class="icon-btn" style="width:48px;height:48px;font-size:22px" data-act="bars" data-d="1" aria-label="Un compás más">+</button>
+          <span class="muted" style="margin:0 6px">compases</span>
+          <div class="row quick">${[2, 4, 8, 16].map(n => `<button class="btn small" data-act="set-bars" data-n="${n}" aria-pressed="${s.bars === n}">${n}</button>`).join("")}</div>
+        </div>
+        <div class="add-chips">${KINDS.map(k => `<button data-act="set-kind" data-k="${k.k}" style="--c:${k.c}" aria-pressed="${k.k === s.kind}">${esc(k.name)}</button>`).join("")}</div>
+        <div class="row" style="align-items:end">
+          <div class="field grow"><span class="label">Nombre (opcional)</span><input type="text" data-f="label" value="${esc(s.label || "")}" placeholder="${esc(secLabel({ ...full, sections: full.sections.map((x, j) => j === i ? { ...x, label: "" } : x) }, i))}"></div>
+          <div class="field" style="width:96px"><span class="label">BPM</span><input type="number" inputmode="numeric" min="20" max="300" data-f="bpm" value="${s.bpm || ""}" placeholder="${num(song.bpm, 120)}"></div>
+          <div class="field" style="width:84px"><span class="label">Tiempos</span><select data-f="beats">${beatOpts(s.beats || "", true)}</select></div>
+        </div>
+        <div class="row"><button class="btn small" data-act="sec-up" ${i === 0 ? "disabled" : ""}>‹ Mover antes</button><button class="btn small" data-act="sec-down" ${i === secs.length - 1 ? "disabled" : ""}>Mover después ›</button>
+          <span class="grow"></span><button class="btn small" data-act="sec-dup">Duplicar</button><button class="btn small danger" data-act="sec-del">Quitar</button></div>
+      </div>`;
+    }
     editor = `<div class="stack">
       <div class="form-grid" data-song>
         <div class="field"><span class="label">Título</span><input id="f-title" type="text" data-sf="title" value="${esc(song.title || "")}"></div>
@@ -964,17 +1011,19 @@ function renderSongs() {
         <div class="field"><span class="label">Tiempos</span><select data-sf="beats">${beatOpts(num(song.beats, 4))}</select></div>
         <div class="field"><span class="label">Figura</span><select data-sf="unit">${[2, 4, 8].map(u => `<option value="${u}" ${u === num(song.unit, 4) ? "selected" : ""}>${u}</option>`).join("")}</select></div>
       </div>
-      <div class="row"><h3 class="grow">Secciones · ${totalBars} compases · ${fmtDur(songSeconds({ ...song, sections: secs.map(x => ({ ...x, bars: x.bars || 1 })) }))}</h3>
+      <div class="row"><h3 class="grow" id="arr-total">Estructura · ${totalBars} compases · ${fmtDur(songSeconds(full))}</h3>
         <button class="btn small" data-act="play-song">Abrir en directo</button></div>
-      <div class="secs">
-        ${secs.length ? `<div class="sec-head label"><span></span><span>Tipo</span><span>Nombre (opcional)</span><span>Compases</span><span>BPM</span><span>Tiempos</span><span></span></div>` : ""}
-        ${rows || `<div class="empty">Añade secciones con los botones de abajo.</div>`}
-      </div>
-      <div class="stack" style="gap:8px"><span class="label">Añadir sección</span><div class="add-chips">${chips}</div></div>
-      <p class="muted" style="margin:0;font-size:13px">El BPM y los tiempos de cada sección son opcionales: si los dejas vacíos se usan los de la canción. Si hay varias secciones del mismo tipo se numeran solas (Verse 1, Verse 2…).</p>
+      <div class="arr-wrap">${secs.length ? `<div class="arr" style="--ppb:${ppb}px"><div class="ruler">${ruler}</div><div class="arr-row">${blocks}</div></div>`
+        : `<div class="arr-empty">Añade la primera sección con los botones de abajo.</div>`}</div>
+      <p class="muted" style="margin:0;font-size:13px">Arrastra el borde derecho de un bloque (‖) para darle más o menos compases. Cada rayita es un compás y las líneas gruesas marcan grupos de 4. Normalmente las intros y finales tienen 4 u 8 compases, y las estrofas y coros 8 o 16.</p>
+      <div class="stack" style="gap:8px"><span class="label">Añadir sección al final</span><div class="add-chips">${chips}</div></div>
+      ${insp}
       <div class="row" style="justify-content:flex-end"><button class="btn danger" data-act="del-song">Borrar canción</button></div>
     </div>`;
   }
+  // Keep where each panel was scrolled: every edit redraws the editor.
+  const keep = [...v.querySelectorAll(".pane-body, .arr-wrap")].map(el => [el.scrollTop, el.scrollLeft]);
+  const sameSong = v.dataset.song === UI.songId; v.dataset.song = UI.songId || "";
   v.innerHTML = `<section class="split">
     <div class="pane"><div class="pane-head"><div class="row"><h2 class="grow">Canciones</h2><button class="btn primary small" data-act="new-song">+ Nueva</button></div>
       <input type="search" id="song-q" placeholder="Buscar" value="${esc(UI.songQ)}" aria-label="Buscar canciones">
@@ -982,6 +1031,7 @@ function renderSongs() {
       <div class="pane-body" style="padding:0">${items || `<div class="empty">${q ? "Nada coincide." : "Aún no hay canciones."}</div>`}</div></div>
     <div class="pane"><div class="pane-body">${editor}</div></div>
   </section>`;
+  if (sameSong) v.querySelectorAll(".pane-body, .arr-wrap").forEach((el, k) => { if (keep[k]) { el.scrollTop = keep[k][0]; el.scrollLeft = keep[k][1]; } });
 }
 
 /* ---------- Setlists editor ---------- */
@@ -1071,6 +1121,38 @@ function renderSettings() {
 }
 
 /* ---------- Events ---------- */
+/* Drag the right edge of a section block to change its bars: the block grows live, snapping to whole bars,
+   and the song is saved once the finger lifts. */
+let drag = null, dragEnded = false;
+document.addEventListener("pointerdown", e => {
+  const g = e.target.closest("[data-grip]"); if (!g) return;
+  const song = songById(UI.songId); const i = +g.dataset.grip; if (!song || !song.sections[i]) return;
+  e.preventDefault();
+  const blk = g.closest(".ablk");
+  drag = { i, x: e.clientX, start: song.sections[i].bars || 1, bars: song.sections[i].bars || 1, blk, ppb: UI.ppb, song };
+  try { g.setPointerCapture(e.pointerId); } catch {}
+  document.querySelectorAll(".ablk.sel").forEach(b => b.classList.remove("sel"));
+  blk.classList.add("dragging", "sel");
+});
+document.addEventListener("pointermove", e => {
+  if (!drag) return;
+  const bars = clamp(drag.start + Math.round((e.clientX - drag.x) / drag.ppb), 1, 128);
+  if (bars === drag.bars) return;
+  drag.bars = bars;
+  drag.blk.style.width = bars * drag.ppb + "px";
+  drag.blk.querySelector(".n").innerHTML = `${bars}<small>${bars === 1 ? "compás" : "comp."}</small>`;
+  const secs = drag.song.sections.map((x, j) => ({ ...x, bars: j === drag.i ? bars : x.bars || 1 }));
+  const total = $("#arr-total"); if (total) total.textContent = `Estructura · ${secs.reduce((a, x) => a + x.bars, 0)} compases · ${fmtDur(songSeconds({ ...drag.song, sections: secs }))}`;
+});
+function endDrag() {
+  if (!drag) return;
+  const d = drag; drag = null;
+  dragEnded = true; setTimeout(() => { dragEnded = false; }, 50); // the click that follows the drag must not reselect
+  UI.selSec = d.i;
+  if (d.bars !== d.start) editSong(s => { s.sections[d.i].bars = d.bars; }); else renderSongs();
+}
+document.addEventListener("pointerup", endDrag);
+document.addEventListener("pointercancel", endDrag);
 let cueKind = null;
 /* "VERSE 2.wav" -> verse2, "PRE CHORUS.wav" -> prechorus, "END.wav" -> ending, "ONE.wav" -> count1. Anything else is skipped. */
 function cueKeyFromName(name) {
@@ -1104,13 +1186,17 @@ document.addEventListener("click", async e => {
     case "new-song": newSong(); break;
     case "import-pulso": importPulso(el); break;
     case "edit-live-song": UI.songId = L.list[L.idx]; switchTab("songs"); break;
-    case "pick-song": UI.songId = el.dataset.id; renderSongs(); break;
-    case "bars": editSong(s => { const x = s.sections[i]; x.bars = clamp((x.bars || 1) + +el.dataset.d, 1, 256); }); break;
-    case "sec-up": editSong(s => { const x = s.sections.splice(i, 1)[0]; s.sections.splice(i - 1, 0, x); }); break;
-    case "sec-down": editSong(s => { const x = s.sections.splice(i, 1)[0]; s.sections.splice(i + 1, 0, x); }); break;
-    case "sec-dup": editSong(s => { s.sections.splice(i + 1, 0, { ...s.sections[i], id: uid() }); }); break;
-    case "sec-del": editSong(s => { s.sections.splice(i, 1); }); break;
-    case "add-sec": editSong(s => { const k = el.dataset.k; s.sections.push({ id: uid(), kind: k, bars: k === "tag" || k === "ending" ? 4 : k === "intro" || k === "outro" || k === "prechorus" ? 4 : 8 }); }); break;
+    case "pick-song": UI.songId = el.dataset.id; UI.selSec = 0; renderSongs(); break;
+    case "sel-sec": if (dragEnded) break; UI.selSec = i; renderSongs(); break;
+    case "bars": editSong(s => { const x = s.sections[i]; x.bars = clamp((x.bars || 1) + +el.dataset.d, 1, 128); }); break;
+    case "set-bars": editSong(s => { s.sections[i].bars = +el.dataset.n; }); break;
+    case "set-kind": editSong(s => { s.sections[i].kind = el.dataset.k; }); break;
+    case "sec-up": UI.selSec = i - 1; editSong(s => { const x = s.sections.splice(i, 1)[0]; s.sections.splice(i - 1, 0, x); }); break;
+    case "sec-down": UI.selSec = i + 1; editSong(s => { const x = s.sections.splice(i, 1)[0]; s.sections.splice(i + 1, 0, x); }); break;
+    case "sec-dup": UI.selSec = i + 1; editSong(s => { s.sections.splice(i + 1, 0, { ...s.sections[i], id: uid() }); }); break;
+    case "sec-del": UI.selSec = Math.max(0, i - 1); editSong(s => { s.sections.splice(i, 1); }); break;
+    case "add-sec": editSong(s => { const k = el.dataset.k; s.sections.push({ id: uid(), kind: k, bars: ["intro", "outro", "prechorus", "tag", "ending", "turnaround"].includes(k) ? 4 : 8 }); UI.selSec = s.sections.length - 1; });
+      setTimeout(() => { const w = $(".arr-wrap"); if (w) w.scrollLeft = w.scrollWidth; }, 0); break;
     case "play-song": chooseSet(null, UI.songId); switchTab("live"); break;
     case "del-song": { const s = songById(UI.songId); if (s && confirm(`¿Borrar «${s.title || "Sin título"}»?`)) { Store.del("songs", s.id); UI.songId = null; } break; }
     // setlists
