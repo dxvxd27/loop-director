@@ -222,7 +222,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "1";
+const APP_VERSION = "2";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -673,9 +673,10 @@ function schedule() {
     if (L.beat === 0) L.cued = null;
     playBuf(L.beat === 0 && c.accent ? clickBuf.up : clickBuf.rim, c.clickVol, t);
     const cue = cueFor(peekNext());
-    if (cue && cue.key !== L.cued) { L.cueEnd = playCue(cue.cue, t); L.cued = cue.key; }
-    // Spoken count during the count-in ("one, two, three, four"), skipping any number the section cue is still talking over.
-    else if (L.countLeft > 0 && c.voiceCount && L.beat < 4 && t >= (L.cueEnd || 0) - 0.03) playCue("count" + (L.beat + 1), t);
+    if (cue && cue.key !== L.cued) { playCue(cue.cue, t); L.cued = cue.key; L.cueBeat = L.beat; }
+    // Spoken count: after a section cue the rest of the bar is counted ("Chorus, two, three, four"),
+    // and a count-in bar without a cue is counted in full ("one, two, three, four").
+    else if (c.voiceCount && L.beat < 4 && (L.cued ? L.beat > L.cueBeat : L.countLeft > 0)) playCue("count" + (L.beat + 1), t);
     L.queue.push({ t, dur: 60 / p.bpm, song: L.song, idx: L.idx, sec: L.sec, bar: L.bar, beat: L.beat, beats: p.beats, bpm: p.bpm, count: L.countLeft });
     L.nextTime += 60 / p.bpm;
     if (++L.beat >= p.beats) { L.beat = 0; L.barDone = true; }
@@ -688,7 +689,7 @@ async function start() {
   await loadClicks(); await loadCues();
   if (L.playing) return;
   if (!L.song || !L.song.sections.length) { toast("Esta canción no tiene secciones. Añádelas en Canciones."); return; }
-  L.playing = true; L.ending = false; L.bar = 0; L.beat = 0; L.barDone = false; L.cued = null; L.cueEnd = 0; L.queue = []; L.ev = null;
+  L.playing = true; L.ending = false; L.bar = 0; L.beat = 0; L.barDone = false; L.cued = null; L.cueBeat = 0; L.queue = []; L.ev = null;
   L.countLeft = cfg().countIn;
   L.nextTime = ctx.currentTime + (dev("safestart", false) ? 0.3 : 0.015);
   if (L.countLeft === 0) { playCue(cueKeyFor(L.song, L.sec), L.nextTime); L.cued = "start"; }
@@ -774,7 +775,14 @@ function renderLive() {
   if (!song) {
     v.innerHTML = `<section class="live"><div class="live-main"><div class="live-empty"><div class="stack" style="align-items:center">
       <h2>Sin canciones</h2><p class="muted" style="margin:0">Crea una canción con sus secciones para empezar.</p>
-      <button class="btn primary" data-act="new-song">Nueva canción</button></div></div></div>${side}</section>`;
+      <div class="row" style="justify-content:center"><button class="btn primary" data-act="new-song">Nueva canción</button><button class="btn" data-act="import-pulso">Importar de Pulso Libre</button></div></div></div></div>${side}</section>`;
+    return;
+  }
+  if (!song.sections || !song.sections.length) {
+    v.innerHTML = `<section class="live"><div class="live-main"><div class="live-empty"><div class="stack" style="align-items:center">
+      <div class="label">Canción ${L.idx + 1} de ${L.list.length} · ${num(song.bpm, 120)} BPM</div>
+      <h2>${esc(song.title || "Sin título")}</h2><p class="muted" style="margin:0">Esta canción aún no tiene secciones.</p>
+      <button class="btn primary" data-act="edit-live-song">Añadir secciones</button></div></div></div>${side}</section>`;
     return;
   }
   const c = cfg();
@@ -898,6 +906,27 @@ function newSong() {
   setTimeout(() => { const t = $("#f-title"); if (t) { t.focus(); t.select(); } }, 30);
 }
 function saveSong(song) { Store.put("songs", song.id, song); }
+/* Bring in the songs of Pulso Libre (same account, same Supabase project): title, tempo and meter.
+   Importing again updates those fields and keeps the sections already written here. */
+async function importPulso(btn) {
+  if (!Store.session) { toast("Inicia sesión con tu cuenta de EasyPlan para importar."); UI.account = true; renderAccount(); return; }
+  if (!navigator.onLine) { toast("Hace falta conexión para importar."); return; }
+  if (btn) btn.disabled = true;
+  try {
+    const t = await Store.token(); if (!t) throw new Error("Sin sesión");
+    const r = await fetch(SB_URL + "/rest/v1/pulso_docs?select=id,data&coll=eq.songs&deleted=eq.false", { headers: { apikey: SB_KEY, Authorization: "Bearer " + t } });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    let added = 0, updated = 0;
+    for (const row of await r.json()) {
+      const d = row.data || {}, id = "pl-" + row.id, old = songById(id);
+      const song = { ...(old || {}), title: d.title || "Sin título", bpm: clamp(num(d.bpm, 120), 20, 300), beats: clamp(num(d.beats, 4), 1, 16), unit: num(d.unit, 4), sections: old?.sections || [] };
+      if (old && old.title === song.title && old.bpm === song.bpm && old.beats === song.beats && old.unit === song.unit) continue;
+      Store.put("songs", id, song); old ? updated++ : added++;
+    }
+    toast(added || updated ? `De Pulso Libre: ${added} nueva${added === 1 ? "" : "s"}${updated ? `, ${updated} actualizada${updated === 1 ? "" : "s"}` : ""}. Añádeles las secciones.` : "Ya tienes todas las canciones de Pulso Libre.");
+  } catch { toast("No se pudieron leer las canciones de Pulso Libre."); }
+  if (btn) btn.disabled = false;
+}
 function editSong(fn) {
   const s = songById(UI.songId); if (!s) return;
   const copy = JSON.parse(JSON.stringify(s)); copy.sections = copy.sections || [];
@@ -948,7 +977,8 @@ function renderSongs() {
   }
   v.innerHTML = `<section class="split">
     <div class="pane"><div class="pane-head"><div class="row"><h2 class="grow">Canciones</h2><button class="btn primary small" data-act="new-song">+ Nueva</button></div>
-      <input type="search" id="song-q" placeholder="Buscar" value="${esc(UI.songQ)}" aria-label="Buscar canciones"></div>
+      <input type="search" id="song-q" placeholder="Buscar" value="${esc(UI.songQ)}" aria-label="Buscar canciones">
+      <button class="btn small" data-act="import-pulso">Importar de Pulso Libre</button></div>
       <div class="pane-body" style="padding:0">${items || `<div class="empty">${q ? "Nada coincide." : "Aún no hay canciones."}</div>`}</div></div>
     <div class="pane"><div class="pane-body">${editor}</div></div>
   </section>`;
@@ -1019,7 +1049,7 @@ function renderSettings() {
       <h3>Al tocar</h3>
       <div class="field"><span class="label">Cuenta de entrada</span>
         <div class="seg" role="group">${[0, 1, 2].map(n => `<button data-act="countin" data-v="${n}" aria-pressed="${c.countIn === n}">${n ? n + (n > 1 ? " compases" : " compás") : "Sin cuenta"}</button>`).join("")}</div></div>
-      <label class="toggle"><span>Cuenta hablada (one, two, three, four)</span><input type="checkbox" data-cfg="voiceCount" ${c.voiceCount ? "checked" : ""}></label>
+      <label class="toggle"><span>Contar después de cada aviso («Chorus, two, three, four») y en la cuenta de entrada</span><input type="checkbox" data-cfg="voiceCount" ${c.voiceCount ? "checked" : ""}></label>
       <label class="toggle"><span>Al acabar una canción, seguir con la siguiente del setlist</span><input type="checkbox" data-cfg="autoNext" ${c.autoNext ? "checked" : ""}></label>
       <p class="muted" style="margin:0;font-size:13px">Si está apagado, el clic se para al final y la siguiente canción queda lista. Durante la canción también puedes tocar otra en el setlist para pasar a ella.</p>
     </div>
@@ -1072,6 +1102,8 @@ document.addEventListener("click", async e => {
     case "next-song": jumpSong(L.idx + 1); break;
     // songs
     case "new-song": newSong(); break;
+    case "import-pulso": importPulso(el); break;
+    case "edit-live-song": UI.songId = L.list[L.idx]; switchTab("songs"); break;
     case "pick-song": UI.songId = el.dataset.id; renderSongs(); break;
     case "bars": editSong(s => { const x = s.sections[i]; x.bars = clamp((x.bars || 1) + +el.dataset.d, 1, 256); }); break;
     case "sec-up": editSong(s => { const x = s.sections.splice(i, 1)[0]; s.sections.splice(i - 1, 0, x); }); break;
