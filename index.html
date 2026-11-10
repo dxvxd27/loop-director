@@ -249,7 +249,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "5";
+const APP_VERSION = "6";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -664,9 +664,10 @@ function peekNext() {
   if (L.countLeft > 1) return { count: true };
   if (L.countLeft === 1) return { sec: L.sec, bar: 0, start: true };
   const to = q => (q.song != null && q.song !== L.idx ? { song: q.song, sec: q.sec } : { sec: q.sec });
-  if (p && p.mode === "bar") return { ...to(p), bar: 0, start: true };
+  // "Con aviso": the bar after the tap announces the section (cue + "two, three, four"); the section starts the bar after.
+  if (p && p.mode === "bar" && L.barNo + 1 >= (p.at || 0)) return { ...to(p), bar: 0, start: true, viaPending: true };
   if (L.bar + 1 < cur.bars) return { sec: L.sec, bar: L.bar + 1 };
-  if (p) return { ...to(p), bar: 0, start: true };
+  if (p && p.mode === "end") return { ...to(p), bar: 0, start: true, viaPending: true };
   if (L.loop) return { sec: L.sec, bar: 0, start: true, loop: true };
   if (L.sec + 1 < secs.length) return { sec: L.sec + 1, bar: 0, start: true };
   if (cfg().autoNext && L.idx + 1 < L.list.length) return { song: L.idx + 1, sec: 0, bar: 0, start: true };
@@ -679,10 +680,11 @@ function cueFor(n) {
   return song && song.sections[n.sec] ? { cue: cueKeyFor(song, n.sec), key: (n.song ?? L.idx) + ":" + n.sec } : null;
 }
 function advance() {
-  if (L.countLeft > 0) { L.countLeft--; L.bar = 0; return true; }
-  const n = peekNext();
+  if (L.countLeft > 0) { L.countLeft--; L.bar = 0; L.barNo++; return true; }
+  const n = peekNext(); // decided with the bar number of the bar that is ending, like every peek during it
+  L.barNo++;
   if (n.end) return false;
-  if (n.start && !n.loop && L.pending) { L.pending = null; L.loop = false; }
+  if (n.viaPending) { L.pending = null; L.loop = false; }
   if (n.song != null) {
     L.idx = n.song; L.song = cloneSong(songById(L.list[n.song])); saveLive();
     L.countLeft = cfg().countIn;
@@ -719,7 +721,7 @@ async function start() {
   await loadClicks(); await loadCues();
   if (L.playing) return;
   if (!L.song || !L.song.sections.length) { toast("Esta canción no tiene secciones. Añádelas en Canciones."); return; }
-  L.playing = true; L.ending = false; L.bar = 0; L.beat = 0; L.barDone = false; L.cued = null; L.cueBeat = 0; L.queue = []; L.ev = null;
+  L.playing = true; L.ending = false; L.bar = 0; L.beat = 0; L.barDone = false; L.cued = null; L.cueBeat = 0; L.barNo = 0; L.queue = []; L.ev = null;
   L.countLeft = cfg().countIn;
   L.nextTime = ctx.currentTime + (dev("safestart", false) ? 0.3 : 0.015);
   if (L.countLeft === 0) { playCue(cueKeyFor(L.song, L.sec), L.nextTime); L.cued = "start"; }
@@ -774,7 +776,7 @@ function jumpTo(sec) {
   if (!L.playing) { L.sec = sec; L.bar = 0; renderLive(); return; }
   if (L.countLeft > 0 && !L.pending) { L.sec = sec; L.cued = null; renderLive(); return; } // nothing played yet: just start there
   const p = L.pending;
-  L.pending = p && p.song == null && p.sec === sec ? null : { sec, mode: cfg().mode };
+  L.pending = p && p.song == null && p.sec === sec ? null : { sec, mode: cfg().mode, at: announceAt(false) };
   renderLive();
 }
 function jumpSong(idx) {
@@ -782,11 +784,14 @@ function jumpSong(idx) {
   if (!L.playing) { selectSong(idx); renderLive(); return; }
   if (idx === L.idx) { L.pending = null; renderLive(); return; }
   const p = L.pending;
-  L.pending = p && p.song === idx ? null : { song: idx, sec: 0, mode: cfg().mode };
+  L.pending = p && p.song === idx ? null : { song: idx, sec: 0, mode: cfg().mode, at: announceAt(true) };
   renderLive();
 }
 function toggleLoop() { if (!L.song) return; L.loop = !L.loop; renderLive(); }
-function setMode(m) { setCfg({ mode: m }); if (L.pending) L.pending.mode = m; }
+/* Bar number where an "aviso" jump lands: the next downbeat starts the announcing bar, the one after starts the section.
+   A song change with a count-in already announces itself, so it starts on the next downbeat. */
+function announceAt(isSong) { return L.barNo + (isSong && cfg().countIn > 0 ? 1 : 2); }
+function setMode(m) { setCfg({ mode: m }); if (L.pending) { L.pending.mode = m; if (m === "bar") L.pending.at = announceAt(L.pending.song != null); } }
 
 /* ---------- UI state ---------- */
 const UI = { tab: "live", songId: null, setId: null, account: false, songQ: "", addQ: "" };
@@ -876,7 +881,7 @@ function renderLive() {
         <button class="play ${L.playing ? "stop" : ""}" data-act="play">${L.playing ? ICON_STOP + "Parar" : ICON_PLAY + "Tocar"}</button>
         <button class="tbtn loop" data-act="loop" aria-pressed="${L.loop}">${ICON_LOOP}Loop</button>
         <div class="seg" role="group" aria-label="Cuándo saltar">
-          <button data-act="mode" data-v="bar" aria-pressed="${c.mode === "bar"}">Siguiente compás</button>
+          <button data-act="mode" data-v="bar" aria-pressed="${c.mode === "bar"}">Con aviso (1 compás)</button>
           <button data-act="mode" data-v="end" aria-pressed="${c.mode === "end"}">Final de sección</button>
         </div>
       </div>
@@ -920,7 +925,7 @@ function paintLive(force) {
     });
     document.querySelectorAll(".sp-row").forEach(r => r.classList.toggle("queued", !!(L.pending && L.pending.song === +r.dataset.i)));
     const lb = $("[data-act=loop]"); if (lb) lb.setAttribute("aria-pressed", String(L.loop)); // a jump switches the loop off on its own
-    const st = $("#status"), mode = L.pending && L.pending.mode === "end" ? "al final de la sección" : "en el siguiente compás";
+    const st = $("#status"), mode = L.pending && L.pending.mode === "end" ? "al final de la sección" : "tras un compás de aviso";
     if (L.pending && L.pending.song != null) {
       const ns = songById(L.list[L.pending.song]);
       st.innerHTML = `<span class="tag">Siguiente</span> <b>${esc(ns ? ns.title : "")}</b> ${mode} · toca otra vez para cancelar`;
