@@ -249,7 +249,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "4";
+const APP_VERSION = "5";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -414,9 +414,12 @@ const Store = {
     this.syncing = true; setSync();
     try {
       const ops = Object.values(this.pending);
-      if (ops.length) {
-        await this.rest("POST", "?on_conflict=user_id,coll,id", ops.map(o => ({ coll: o.coll, id: o.id, data: o.data, deleted: o.deleted })));
-        for (const o of ops) { const k = o.coll + "/" + o.id; if (this.pending[k] === o) delete this.pending[k]; }
+      // Upload in small batches: voice cues are ~40 KB each and one big request could be refused.
+      for (let s = 0; s < ops.length; s += 4) {
+        const part = ops.slice(s, s + 4);
+        await this.rest("POST", "?on_conflict=user_id,coll,id", part.map(o => ({ coll: o.coll, id: o.id, data: o.data, deleted: o.deleted })));
+        for (const o of part) { const k = o.coll + "/" + o.id; if (this.pending[k] === o) delete this.pending[k]; }
+        this.persist();
       }
       let q = "?select=coll,id,data,deleted,updated_at&order=updated_at.asc";
       if (this.lastSync) q += "&updated_at=gt." + encodeURIComponent(this.lastSync);
@@ -924,6 +927,8 @@ function paintLive(force) {
     } else if (L.pending) st.innerHTML = `<span class="tag">Salto</span> a <b>${esc(secLabel(song, L.pending.sec))}</b> ${mode} · toca otra vez para cancelar`;
     else if (e.count) st.innerHTML = `Cuenta de entrada… empieza en <b>${esc(secLabel(song, e.sec))}</b>`;
     else if (L.loop) st.innerHTML = `<span class="tag">Loop</span> repitiendo <b>${esc(secLabel(song, e.sec))}</b> hasta quitarlo`;
+    else if (!L.playing && !CUE_KEYS.some(k => cueSource(k.key)))
+      st.innerHTML = `<span class="tag">Sin avisos de voz</span> Impórtalos una vez en <button class="btn small" data-act="go-settings">Ajustes → Importar avisos</button>`;
     else if (!L.playing) st.innerHTML = `Empieza en <b>${esc(secLabel(song, e.sec))}</b>${cfg().countIn ? ` tras ${cfg().countIn} compás${cfg().countIn > 1 ? "es" : ""} de cuenta` : ""}. Toca una sección para elegir otra.`;
     else {
       const left = s.bars - e.bar - 1, nx = e.sec + 1 < song.sections.length ? secLabel(song, e.sec + 1) : null;
@@ -1225,6 +1230,7 @@ document.addEventListener("click", async e => {
     case "pick-song": UI.songId = el.dataset.id; UI.selSec = 0; renderSongs(); break;
     case "sel-sec": if (dragEnded) break; UI.selSec = i; if (preview && L.playing) jumpTo(i); renderSongs(); break;
     case "preview": togglePreview(); break;
+    case "go-settings": switchTab("settings"); break;
     case "bars": editSong(s => { const x = s.sections[i]; x.bars = clamp((x.bars || 1) + +el.dataset.d, 1, 128); }); break;
     case "set-bars": editSong(s => { s.sections[i].bars = +el.dataset.n; }); break;
     case "set-kind": editSong(s => { s.sections[i].kind = el.dataset.k; }); break;

@@ -1,6 +1,6 @@
 // Guarda la app en el iPad para que abra al instante y funcione sin conexión en el culto.
 // Sube VERSION cada vez que cambies un archivo para que los dispositivos descarguen la nueva versión.
-const VERSION = "ld-v4"; // igual que APP_VERSION en index.html
+const VERSION = "ld-v5"; // igual que APP_VERSION en index.html
 const SHELL = ["./", "index.html", "sounds.js", "manifest.webmanifest", "apple-touch-icon.png", "icon-192.png", "icon-512.png"];
 
 // GitHub Pages pide al navegador guardar cada archivo 10 minutos; "no-cache" obliga a preguntar
