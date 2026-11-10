@@ -77,6 +77,12 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 .now { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: end; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 12px 16px; }
 .song-title { font-weight: 700; font-size: 24px; line-height: 1.15; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .readouts { display: flex; gap: 22px; align-items: flex-end; }
+/* Time left of the tempo change between two songs: a bar that empties as the seconds pass. */
+.trbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+.trbar[hidden] { display: none; }
+.trbar .track { flex: 1; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.trbar .track i { display: block; height: 100%; width: 100%; background: var(--led); border-radius: 4px; transform-origin: left; }
+.trbar b { color: var(--ink); font-variant-numeric: tabular-nums; }
 .ro { display: flex; flex-direction: column; align-items: flex-start; gap: 0; }
 .ro b { font-family: var(--display); font-weight: 800; font-size: 40px; line-height: 1; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ro b small { font-size: 18px; color: var(--muted); font-weight: 600; margin-left: 4px; }
@@ -275,7 +281,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "17";
+const APP_VERSION = "18";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -370,8 +376,9 @@ const SB_TABLE = "loopdirector_docs";
 const LS_KEY = "loopdirector-v1";
 const Store = {
   songs: [], setlists: [], cues: [], config: null,
-  // Church library shared with you by its owner: its songs (ids "ch:<id>") and voice cues. Empty if none is shared with you.
-  church: { owner: null, email: "", songs: [], cues: [], last: null },
+  // Church library: songs with ids "ch:<id>", kept apart from your own songs. It is yours (and you share it from Ajustes),
+  // or the one someone shared with you, whose voice cues you also use. owner is null until the first sync.
+  church: { v: 2, owner: null, email: "", songs: [], cues: [], last: null },
   session: null, pending: {}, lastSync: null, syncing: false, error: null, listeners: [],
   onChange(fn) { this.listeners.push(fn); },
   emit(what) { this.listeners.forEach(f => f(what)); },
@@ -380,7 +387,7 @@ const Store = {
       const l = JSON.parse(localStorage.getItem(LS_KEY) || "{}");
       this.songs = l.songs || []; this.setlists = l.setlists || []; this.cues = l.cues || []; this.config = l.config || null;
       this.session = l.session || null; this.pending = l.pending || {}; this.lastSync = l.lastSync || null;
-      if (l.church) this.church = { ...this.church, ...l.church };
+      if (l.church && l.church.v === 2) this.church = { ...this.church, ...l.church };
     } catch {}
   },
   persist() {
@@ -441,7 +448,7 @@ const Store = {
   signOut() {
     this.session = null; this.lastSync = null; this.error = null; this.pending = {};
     this.songs = []; this.setlists = []; this.cues = []; this.config = null;
-    this.church = { owner: null, email: "", songs: [], cues: [], last: null };
+    this.church = { v: 2, owner: null, email: "", songs: [], cues: [], last: null };
     this.persist(); ["songs", "setlists", "cues", "config"].forEach(k => this.emit(k)); setSync();
   },
   uid() { try { return JSON.parse(atob(this.session.access.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))).sub; } catch { return null; } },
@@ -466,22 +473,26 @@ const Store = {
     if (!r.ok) throw new Error("HTTP " + r.status);
     return method === "GET" ? r.json() : null;
   },
-  /* The church library someone shared with you: who owns it, then its songs and cues changed since last time. */
+  /* The church library: the one someone shared with you (its songs and voice cues), else your own (its songs).
+     Its songs are the owner's rows with ids "ch:<id>"; the owner's voice cues are kept here as "ch:<key>". */
   async syncChurch() {
-    const email = (this.session.email || "").toLowerCase();
+    const me = this.uid(), email = (this.session.email || "").toLowerCase();
     const shares = await this.rest("GET", "?select=owner,owner_email&member_email=eq." + encodeURIComponent(email) + "&order=created_at.asc", null, "loopdirector_shares");
-    const sh = shares[0] || null;
-    if (!sh || sh.owner !== this.church.owner) {
-      this.church = { owner: sh ? sh.owner : null, email: sh ? sh.owner_email : "", songs: [], cues: [], last: null };
-      for (const k of Object.keys(this.pending)) if (this.pending[k].id.startsWith("ch:")) delete this.pending[k];
+    const sh = shares.find(x => x.owner !== me) || null;
+    const owner = sh ? sh.owner : me, mine = owner === me;
+    if (!owner) return;
+    if (owner !== this.church.owner) {
+      this.church = { v: 2, owner, email: sh ? sh.owner_email : this.session.email || "", songs: [], cues: [], last: null };
+      for (const k of Object.keys(this.pending)) if (this.pending[k].id.startsWith("ch:") && this.pending[k].owner !== owner) delete this.pending[k];
       this.emit("songs"); this.emit("cues");
-      if (!sh) return;
     }
-    let q = "?select=coll,id,data,deleted,updated_at&coll=in.(songs,cues)&order=updated_at.asc&user_id=eq." + sh.owner;
+    let q = "?select=coll,id,data,deleted,updated_at&order=updated_at.asc&user_id=eq." + owner
+      + (mine ? "&coll=eq.songs&id=like.ch:*" : "&or=(coll.eq.cues,and(coll.eq.songs,id.like.ch:*))");
     if (this.church.last) q += "&updated_at=gt." + encodeURIComponent(this.church.last);
     const rows = await this.rest("GET", q);
     for (const r of rows) {
-      if (!this.pending[r.coll + "/ch:" + r.id]) this.applyLocal(r.coll, "ch:" + r.id, r.data, r.deleted);
+      const id = r.coll === "cues" ? "ch:" + r.id : r.id;
+      if (!this.pending[r.coll + "/" + id]) this.applyLocal(r.coll, id, r.data, r.deleted);
       this.church.last = r.updated_at;
     }
   },
@@ -497,13 +508,13 @@ const Store = {
         for (let s = 0; s < ops.length; s += 4) {
           const part = ops.slice(s, s + 4);
           await this.rest("POST", "?on_conflict=user_id,coll,id", part.map(o => o.id.startsWith("ch:")
-            ? { user_id: o.owner || this.church.owner, coll: o.coll, id: o.id.slice(3), data: o.data, deleted: o.deleted }
+            ? { user_id: o.owner || this.church.owner, coll: o.coll, id: o.coll === "cues" ? o.id.slice(3) : o.id, data: o.data, deleted: o.deleted }
             : { coll: o.coll, id: o.id, data: o.data, deleted: o.deleted }));
           for (const o of part) { const k = o.coll + "/" + o.id; if (this.pending[k] === o) delete this.pending[k]; }
           this.persist();
         }
       }
-      let q = "?select=coll,id,data,deleted,updated_at&order=updated_at.asc" + (me ? "&user_id=eq." + me : "");
+      let q = "?select=coll,id,data,deleted,updated_at&order=updated_at.asc&id=not.like.ch:*" + (me ? "&user_id=eq." + me : "");
       if (this.lastSync) q += "&updated_at=gt." + encodeURIComponent(this.lastSync);
       const rows = await this.rest("GET", q);
       for (const r of rows) {
@@ -1034,6 +1045,7 @@ function renderLive() {
           <div class="ro"><span class="label">Tempo</span><b id="r-bpm">${p0.bpm}<small>${p0.beats}/${song.unit || 4}</small></b></div>
           <div class="dots" id="dots" aria-hidden="true"></div>
         </div>
+        <div class="trbar" id="trbar" hidden><span id="trbar-l"></span><div class="track"><i id="trbar-f"></i></div><b id="trbar-s"></b></div>
       </div>
       <div class="timeline" id="timeline" data-total="${total}">${blocks}</div>
       <div class="status" id="status" aria-live="polite"></div>
@@ -1114,6 +1126,16 @@ function paintLive(force) {
       st.innerHTML = nx ? `Luego <b>${esc(nx)}</b>${left ? ` en ${left} ${left > 1 ? "compases" : "compás"}` : " en el siguiente compás"}` : `Última sección${left ? ` · quedan ${left} ${left > 1 ? "compases" : "compás"}` : ""}`;
       const mk = (s.cues || []).filter(m => m.bar > e.bar + 1 && m.bar <= s.bars).sort((a, b) => a.bar - b.bar)[0];
       if (mk) { const d = mk.bar - e.bar - 1; st.innerHTML += ` · aviso <span class="tag">${esc((CUE_KEYS.find(c => c.key === mk.key) || { name: mk.key }).name)}</span> ${d === 1 ? "en el siguiente compás" : `en ${d} compases`}`; }
+    }
+  }
+  // Tempo change between songs: how long until the new tempo is reached.
+  const tb = $("#trbar"), r = L.playing && e.pre ? L.ramp : null, rl = r ? r.t0 + r.dur - ctx.currentTime : 0;
+  if (tb) {
+    tb.hidden = !(r && rl > 0);
+    if (!tb.hidden) {
+      $("#trbar-l").textContent = `Tempo ${Math.round(r.from)} → ${secParams(song, 0).bpm}`;
+      $("#trbar-f").style.transform = `scaleX(${clamp(rl / r.dur, 0, 1).toFixed(4)})`;
+      $("#trbar-s").textContent = Math.ceil(Math.min(rl, r.dur)) + " s";
     }
   }
   // Smooth playhead inside the current block.
@@ -1287,7 +1309,7 @@ function renderSongs() {
     <div class="pane"><div class="pane-head"><div class="row"><h2 class="grow">Canciones</h2><button class="btn primary small" data-act="new-song">+ Nueva</button></div>
       ${Store.church.owner ? `<div class="seg" role="group" aria-label="Biblioteca"><button data-act="lib" data-v="mine" aria-pressed="${!church}">Mis canciones</button><button data-act="lib" data-v="church" aria-pressed="${church}">Iglesia</button></div>` : ""}
       <input type="search" id="song-q" placeholder="Buscar" value="${esc(UI.songQ)}" aria-label="Buscar canciones">
-      ${church ? `<p class="muted" style="margin:0;font-size:12px">Biblioteca de ${esc(Store.church.email || "la iglesia")}. Lo que cambies aquí lo ven todos.</p>` : `<button class="btn small" data-act="import-pulso">Importar de Pulso Libre</button>`}</div>
+      ${church ? `<p class="muted" style="margin:0;font-size:12px">${Store.church.owner === Store.uid() ? "Biblioteca de la iglesia que compartes desde Ajustes. Lo que cambies aquí lo ven quienes tengan acceso." : "Biblioteca de la iglesia de " + esc(Store.church.email || "otra cuenta") + ". Lo que cambies aquí lo ven todos."}</p>` : `<button class="btn small" data-act="import-pulso">Importar de Pulso Libre</button>`}</div>
       <div class="pane-body" style="padding:0">${items || `<div class="empty">${q ? "Nada coincide." : "Aún no hay canciones."}</div>`}</div></div>
     <div class="pane"><div class="pane-body">${editor}</div></div>
   </section>`;
@@ -1351,17 +1373,17 @@ function editSet(fn) {
 }
 
 /* ---------- Sharing the church library ----------
-   Your songs and voice cues are the church library. People you give access to (by the email of their account)
-   see it, play it, edit and create songs in it, and keep their own songs apart. */
+   The church library (Canciones → «Iglesia») is apart from your own songs. People you give access to (by the email
+   of their account) see it, play it, edit and create songs in it, and use your voice cues; your own songs stay private. */
 let shareList = null;
 function shareCard() {
   if (!Store.session) return `<h3>Biblioteca de la iglesia</h3><p class="muted" style="margin:0">Inicia sesión para compartir tus canciones con otra persona.</p>`;
-  if (Store.church.owner) return `<h3>Biblioteca de la iglesia</h3>
+  if (Store.church.owner && Store.church.owner !== Store.uid()) return `<h3>Biblioteca de la iglesia</h3>
     <p style="margin:0">Tienes acceso a la biblioteca de <b>${esc(Store.church.email || "otra cuenta")}</b>: sus canciones están en Canciones → «Iglesia» y sus avisos de voz suenan también aquí. Puedes editar y crear canciones en ella; lo que cambies lo ven todos. Tus canciones de «Mis canciones» son solo tuyas.</p>`;
-  if (shareList == null) { loadShares(); return `<h3>Compartir mis canciones</h3><p class="muted" style="margin:0">Cargando…</p>`; }
+  if (shareList == null) { loadShares(); return `<h3>Compartir la biblioteca de la iglesia</h3><p class="muted" style="margin:0">Cargando…</p>`; }
   const rows = shareList.map(m => `<div class="row"><span class="grow mono" style="font-size:14px">${esc(m.member_email)}</span><button class="icon-btn" data-act="share-del" data-e="${esc(m.member_email)}" aria-label="Quitar acceso a ${esc(m.member_email)}">✕</button></div>`).join("");
-  return `<h3>Compartir mis canciones</h3>
-    <p class="muted" style="margin:0;font-size:13px">Tus canciones y avisos de voz son la biblioteca de la iglesia. Quien tenga acceso la ve en Canciones → «Iglesia», puede tocarla, editarla y crear canciones nuevas en ella, y además tiene sus propias canciones aparte. Tus setlists y ajustes siguen siendo solo tuyos.</p>
+  return `<h3>Compartir la biblioteca de la iglesia</h3>
+    <p class="muted" style="margin:0;font-size:13px">Quien tenga acceso ve las canciones de Canciones → «Iglesia», puede tocarlas, editarlas y crear nuevas, y usa tus avisos de voz. Tus canciones de «Mis canciones», tus setlists y tus ajustes siguen siendo solo tuyos. Para pasar una canción tuya a la iglesia, ábrela y pulsa «Copiar a la iglesia».</p>
     ${rows || `<p class="muted" style="margin:0">Aún no la compartes con nadie.</p>`}
     <form class="row" id="share-form"><input type="email" id="share-email" placeholder="Correo de su cuenta de EasyPlan" required style="flex:1;min-width:200px" autocomplete="off"><button class="btn primary" type="submit">Dar acceso</button></form>`;
 }
@@ -1378,7 +1400,7 @@ async function addShare(email) {
   shareList = null; const c = $("#share-card"); if (c) c.innerHTML = shareCard();
 }
 async function delShare(email) {
-  if (!confirm(`¿Quitar el acceso de ${email} a tus canciones?`)) return;
+  if (!confirm(`¿Quitar el acceso de ${email} a la biblioteca de la iglesia?`)) return;
   try { await Store.rest("DELETE", "?owner=eq." + Store.uid() + "&member_email=eq." + encodeURIComponent(email), null, "loopdirector_shares"); }
   catch { toast("No se pudo quitar el acceso. Revisa la conexión."); }
   shareList = null; const c = $("#share-card"); if (c) c.innerHTML = shareCard();
