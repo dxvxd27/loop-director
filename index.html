@@ -191,6 +191,18 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 .ablk .mk::before { content: ""; position: absolute; left: -2px; top: 0; height: 60px; border-left: 2px solid var(--led); }
 .ablk .ritz { position: absolute; top: 0; bottom: 0; right: 0; pointer-events: none; background: linear-gradient(to right, transparent, rgba(0, 0, 0, .35)); }
 .ablk .ritz b { position: absolute; right: 32px; top: 6px; font-size: 12px; font-style: italic; color: var(--ink); }
+.mkrow { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 10px; background: color-mix(in srgb, var(--c) 8%, transparent); }
+.barmap { display: grid; grid-template-columns: repeat(var(--n), minmax(26px, 1fr)); gap: 22px 3px; padding-top: 22px; overflow-x: auto; }
+.barmap button { position: relative; height: 40px; border: 0; border-radius: 6px; padding: 0; font-family: var(--mono); font-size: 12px; color: var(--muted);
+  background: color-mix(in srgb, var(--c) 24%, var(--surface)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 45%, transparent); }
+.barmap button.g4 { box-shadow: inset 2px 0 0 color-mix(in srgb, var(--c) 90%, transparent), inset 0 0 0 1px color-mix(in srgb, var(--c) 45%, transparent); }
+.barmap button.rit { background-image: linear-gradient(to bottom, transparent 60%, rgba(0, 0, 0, .35)); }
+.barmap button.other::after { content: ""; position: absolute; left: 3px; top: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--led); opacity: .6; }
+.barmap button.on { background: var(--led); color: var(--led-ink); font-weight: 800; box-shadow: none; }
+.barmap button em { position: absolute; left: 0; bottom: calc(100% + 3px); font-style: normal; font-family: var(--body); font-size: 11px; font-weight: 800; white-space: nowrap; color: var(--led); pointer-events: none; }
+.blk .mk { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px solid var(--led); z-index: 1; pointer-events: none; }
+.blk .mk b { position: absolute; left: 0; bottom: 3px; padding: 0 4px; border-radius: 0 4px 4px 0; background: var(--led); color: var(--led-ink); font-size: 10px; font-weight: 800; white-space: nowrap; }
+.blk .mk.r b { left: auto; right: 0; border-radius: 4px 0 0 4px; }
 .arr-empty { height: 104px; display: grid; place-items: center; border: 2px dashed var(--line); border-radius: 12px; color: var(--muted); }
 .insp { border-left: 6px solid var(--c); }
 .insp .big { font-family: var(--display); font-size: 40px; font-weight: 800; line-height: 1; min-width: 56px; text-align: center; font-variant-numeric: tabular-nums; }
@@ -255,7 +267,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "9";
+const APP_VERSION = "10";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -892,9 +904,10 @@ function renderLive() {
   const secs = song.sections;
   const total = secs.reduce((a, s) => a + s.bars, 0);
   const blocks = secs.map((s, i) => `<button class="blk" data-act="pad" data-i="${i}" style="flex:${s.bars} 1 0;--c:${kindOf(s.kind).c};--bars:${s.bars}" aria-label="${esc(secLabel(song, i))}, ${s.bars} compases">
-      <i class="ticks"></i><i class="fill"></i><span>${esc(secLabel(song, i, true))}</span><small>${s.bars}</small><em class="ph"></em></button>`).join("");
+      <i class="ticks"></i><i class="fill"></i><span>${esc(secLabel(song, i, true))}</span><small>${s.bars}</small>${(s.cues || []).filter(m => m.bar <= s.bars).map(m =>
+        `<i class="mk ${m.bar - 1 > s.bars / 2 ? "r" : ""}" style="left:${((m.bar - 1) / s.bars * 100).toFixed(2)}%"><b>${esc((CUE_KEYS.find(c => c.key === m.key) || { name: m.key }).name)}</b></i>`).join("")}<em class="ph"></em></button>`).join("");
   const pads = secs.map((s, i) => `<button class="pad" data-act="pad" data-i="${i}" style="--c:${kindOf(s.kind).c}">
-      <b>${esc(secLabel(song, i))}</b><small>${s.bars} compás${s.bars > 1 ? "es" : ""}${s.bpm || s.beats ? " · " + secParams(song, i).bpm + " · " + secParams(song, i).beats + "/" + (song.unit || 4) : ""}</small></button>`).join("");
+      <b>${esc(secLabel(song, i))}</b><small>${s.bars} ${s.bars > 1 ? "compases" : "compás"}${s.bpm || s.beats ? " · " + secParams(song, i).bpm + " · " + secParams(song, i).beats + "/" + (song.unit || 4) : ""}</small></button>`).join("");
   const p0 = secParams(song, L.sec);
   v.innerHTML = `<section class="live">
     <div class="live-main">
@@ -972,10 +985,12 @@ function paintLive(force) {
     else if (L.loop) st.innerHTML = `<span class="tag">Loop</span> repitiendo <b>${esc(secLabel(song, e.sec))}</b> hasta quitarlo`;
     else if (!L.playing && !CUE_KEYS.some(k => cueSource(k.key)))
       st.innerHTML = `<span class="tag">Sin avisos de voz</span> Impórtalos una vez en <button class="btn small" data-act="go-settings">Ajustes → Importar avisos</button>`;
-    else if (!L.playing) st.innerHTML = `Empieza en <b>${esc(secLabel(song, e.sec))}</b>${cfg().countIn ? ` tras ${cfg().countIn} compás${cfg().countIn > 1 ? "es" : ""} de cuenta` : ""}. Toca una sección para elegir otra.`;
+    else if (!L.playing) st.innerHTML = `Empieza en <b>${esc(secLabel(song, e.sec))}</b>${cfg().countIn ? ` tras ${cfg().countIn} ${cfg().countIn > 1 ? "compases" : "compás"} de cuenta` : ""}. Toca una sección para elegir otra.`;
     else {
       const left = s.bars - e.bar - 1, nx = e.sec + 1 < song.sections.length ? secLabel(song, e.sec + 1) : null;
-      st.innerHTML = nx ? `Luego <b>${esc(nx)}</b>${left ? ` en ${left} compás${left > 1 ? "es" : ""}` : " en el siguiente compás"}` : `Última sección${left ? ` · quedan ${left} compás${left > 1 ? "es" : ""}` : ""}`;
+      st.innerHTML = nx ? `Luego <b>${esc(nx)}</b>${left ? ` en ${left} ${left > 1 ? "compases" : "compás"}` : " en el siguiente compás"}` : `Última sección${left ? ` · quedan ${left} ${left > 1 ? "compases" : "compás"}` : ""}`;
+      const mk = (s.cues || []).filter(m => m.bar > e.bar + 1 && m.bar <= s.bars).sort((a, b) => a.bar - b.bar)[0];
+      if (mk) { const d = mk.bar - e.bar - 1; st.innerHTML += ` · aviso <span class="tag">${esc((CUE_KEYS.find(c => c.key === mk.key) || { name: mk.key }).name)}</span> ${d === 1 ? "en el siguiente compás" : `en ${d} compases`}`; }
     }
   }
   // Smooth playhead inside the current block.
@@ -1092,18 +1107,24 @@ function renderSongs() {
         </div>
         <div class="stack" style="gap:6px">
           <span class="label">Avisos dentro de la sección</span>
-          ${(s.cues || []).map((m, j) => `<div class="row" data-j="${j}">
-            <select data-mk="${j}" style="width:auto;min-width:150px" aria-label="Aviso">${MARK_KEYS.map(k => `<option value="${k.key}" ${k.key === m.key ? "selected" : ""}>${esc(k.name)}${cueSource(k.key) ? "" : " (sin audio)"}</option>`).join("")}</select>
-            <span class="muted">en el compás</span>
-            <button class="icon-btn" data-act="mk-bar" data-d="-1" aria-label="Un compás antes">−</button><b class="mono" style="min-width:22px;text-align:center">${Math.min(m.bar, s.bars)}</b><button class="icon-btn" data-act="mk-bar" data-d="1" aria-label="Un compás después">+</button>
-            <span class="muted">${s.bars - Math.min(m.bar, s.bars) === 0 ? "(el último)" : `(quedan ${s.bars - Math.min(m.bar, s.bars) + 1})`}</span>
-            <button class="icon-btn" data-act="mk-del" aria-label="Quitar aviso">✕</button></div>`).join("")}
+          ${(s.cues || []).map((m, j) => { const b = Math.min(m.bar, s.bars), ritFrom = s.rit?.bars ? s.bars - s.rit.bars + 1 : 0;
+            return `<div class="mkrow" data-j="${j}">
+            <div class="row">
+              <select data-mk="${j}" style="width:auto;min-width:150px" aria-label="Aviso">${MARK_KEYS.map(k => `<option value="${k.key}" ${k.key === m.key ? "selected" : ""}>${esc(k.name)}${cueSource(k.key) ? "" : " (sin audio)"}</option>`).join("")}</select>
+              <span class="muted">en el compás <b class="mono" style="color:var(--ink)">${b}</b> de ${s.bars} · ${b === s.bars ? "el último" : `quedan ${s.bars - b + 1} contando este`}</span>
+              <span class="grow"></span>
+              <button class="icon-btn" data-act="mk-bar" data-d="-1" aria-label="Un compás antes">‹</button><button class="icon-btn" data-act="mk-bar" data-d="1" aria-label="Un compás después">›</button>
+              <button class="icon-btn" data-act="mk-del" aria-label="Quitar aviso">✕</button></div>
+            <div class="barmap" style="--n:${Math.min(s.bars, 16)}" role="group" aria-label="Compás del aviso: toca uno para moverlo">
+              ${Array.from({ length: s.bars }, (_, k) => { const n = k + 1, other = (s.cues || []).some((o, oj) => oj !== j && Math.min(o.bar, s.bars) === n);
+                return `<button class="${n === b ? "on" : ""} ${other ? "other" : ""} ${ritFrom && n >= ritFrom ? "rit" : ""} ${k % 4 === 0 ? "g4" : ""}" data-act="mk-set" data-n="${n}" aria-pressed="${n === b}" aria-label="Compás ${n}">${n === b ? `<em>${esc(cueName(m.key))}</em>` : ""}${n}</button>`; }).join("")}
+            </div></div>`; }).join("")}
           <div class="row"><button class="btn small" data-act="mk-add">+ Añadir aviso (End, Last Time…)</button>
-            <span class="muted" style="font-size:13px">Suena en el 1 del compás elegido, sin crear otra sección.</span></div>
+            <span class="muted" style="font-size:13px">Toca un compás de la barra para moverlo. Suena en el 1 de ese compás, sin crear otra sección.</span></div>
         </div>
         <div class="row quick"><span class="muted" style="margin-right:4px">Ralentizar al final</span>
           ${[[0, "No"], [1, "1"], [2, "2"], [4, "4"]].map(([n, t]) => `<button class="btn small" data-act="set-rit" data-n="${n}" aria-pressed="${(s.rit?.bars || 0) === n}">${t}</button>`).join("")}
-          ${s.rit?.bars ? `<span class="muted">compás${s.rit.bars > 1 ? "es" : ""}, hasta</span><input type="number" inputmode="numeric" min="20" max="300" data-f="ritTo" value="${num(s.rit.to, Math.round(p.bpm * 0.7))}" style="width:80px" aria-label="Tempo final"><span class="muted">BPM</span>` : ""}
+          ${s.rit?.bars ? `<span class="muted">${s.rit.bars > 1 ? "compases" : "compás"}, hasta</span><input type="number" inputmode="numeric" min="20" max="300" data-f="ritTo" value="${num(s.rit.to, Math.round(p.bpm * 0.7))}" style="width:80px" aria-label="Tempo final"><span class="muted">BPM</span>` : ""}
         </div>
         <div class="row"><button class="btn small" data-act="sec-up" ${i === 0 ? "disabled" : ""}>‹ Mover antes</button><button class="btn small" data-act="sec-down" ${i === secs.length - 1 ? "disabled" : ""}>Mover después ›</button>
           <span class="grow"></span><button class="btn small" data-act="sec-dup">Duplicar</button><button class="btn small danger" data-act="sec-del">Quitar</button></div>
@@ -1314,6 +1335,7 @@ document.addEventListener("click", async e => {
     case "set-kind": editSong(s => { s.sections[i].kind = el.dataset.k; }); break;
     case "mk-add": editSong(s => { const x = s.sections[i]; (x.cues = x.cues || []).push({ key: "ending", bar: Math.max(1, (x.bars || 1) - 1) }); }); break;
     case "mk-del": { const j = +el.closest("[data-j]").dataset.j; editSong(s => { s.sections[i].cues.splice(j, 1); if (!s.sections[i].cues.length) delete s.sections[i].cues; }); break; }
+    case "mk-set": { const j = +el.closest("[data-j]").dataset.j; editSong(s => { s.sections[i].cues[j].bar = +el.dataset.n; }); break; }
     case "mk-bar": { const j = +el.closest("[data-j]").dataset.j; editSong(s => { const x = s.sections[i], m = x.cues[j]; m.bar = clamp(Math.min(m.bar, x.bars || 1) + +el.dataset.d, 1, x.bars || 1); }); break; }
     case "set-rit": editSong(s => { const x = s.sections[i], n = +el.dataset.n; if (n) x.rit = { ...(x.rit || {}), bars: n }; else delete x.rit; }); break;
     case "set-num": editSong(s => { if (el.dataset.n === "auto") delete s.sections[i].n; else s.sections[i].n = +el.dataset.n; }); break;
