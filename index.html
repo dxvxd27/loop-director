@@ -213,6 +213,11 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 .insp .quick button[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .add-chips button { border: 1px solid color-mix(in srgb, var(--c) 60%, var(--line)); background: color-mix(in srgb, var(--c) 16%, var(--surface)); border-radius: 999px; padding: 7px 12px; font-weight: 600; font-size: 13px; }
 .set-item { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); background: var(--surface-2); border-radius: 12px; }
+.trans-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: -2px 0 -2px 38px; padding: 4px 10px; border-left: 2px dashed var(--line); font-size: 13px; }
+.trans-row select { width: auto; padding: 6px 8px; font-size: 13px; }
+.trans-row .arrow { color: var(--muted); font-size: 16px; }
+.trans-row.own { border-left-color: var(--led); }
+.trans-def h3 { margin: 0; }
 .set-item .n { font-family: var(--mono); color: var(--muted); font-size: 13px; text-align: right; }
 .results { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; max-height: 260px; overflow-y: auto; }
 .results .li .s { grid-column: auto; }
@@ -270,7 +275,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "12";
+const APP_VERSION = "13";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -352,7 +357,7 @@ function songSeconds(song) {
 }
 
 /* ---------- Config (synced) and device options (this device only) ---------- */
-const DEFAULT_CFG = { accent: true, clickVol: 0.9, cueVol: 1, countIn: 1, preClick: true, voiceCount: true, autoNext: false, mode: "bar" };
+const DEFAULT_CFG = { accent: true, clickVol: 0.9, cueVol: 1, countIn: 1, preClick: true, voiceCount: true, mode: "bar" };
 const cfg = () => ({ ...DEFAULT_CFG, ...(Store.config || {}) });
 function setCfg(patch) { Store.saveConfig({ ...cfg(), ...patch }); }
 const dev = (k, d) => { try { const v = localStorage.getItem("loopdirector-" + k); return v == null ? d : v === "1"; } catch { return d; } };
@@ -669,7 +674,40 @@ function saveLive() { try { localStorage.setItem("loopdirector-live", JSON.strin
 function buildList() {
   const sl = L.setId && Store.setlists.find(s => s.id === L.setId);
   if (L.setId && !sl) L.setId = null;
-  L.list = sl ? (sl.items || []).map(it => it.songId).filter(id => songById(id)) : sortedSongs().map(s => s.id);
+  L.items = sl ? (sl.items || []).filter(it => songById(it.songId)) : [];
+  L.list = sl ? L.items.map(it => it.songId) : sortedSongs().map(s => s.id);
+}
+/* Transition into song idx of the setlist: seconds of tempo slide and whether it goes in by itself.
+   Each setlist has a default, and each song of the setlist can change it. Outside a setlist there is none. */
+const TRANS_DEF = { sec: 4, auto: false };
+function transFor(idx) {
+  const sl = L.setId && Store.setlists.find(s => s.id === L.setId), it = L.items && L.items[idx];
+  if (!sl) return { sec: 0, auto: false };
+  const d = { ...TRANS_DEF, ...(sl.trans || {}) };
+  return { sec: it && it.trans != null ? it.trans : d.sec, auto: it && it.auto != null ? it.auto : d.auto };
+}
+/* Song change while playing: the click goes on as free click with the next song loaded, sliding to its tempo.
+   With "Entrar sola" it then goes into the first section by itself, with one bar of cue and count. */
+function enterPre(idx, t) {
+  const song = cloneSong(songById(L.list[idx]));
+  if (!song || !song.sections.length) return false;
+  const from = L.lastBpm || secParams(song, 0).bpm, tr = transFor(idx);
+  L.idx = idx; L.song = song; L.sec = 0; L.bar = 0; L.startBar = 0; saveLive();
+  L.pre = true; L.countLeft = 0; L.loop = false; L.pending = null; L.cued = null;
+  L.auto = tr.auto;
+  L.ramp = tr.sec > 0 && Math.abs(from - secParams(song, 0).bpm) > 0.5 ? { t0: t, from, dur: tr.sec } : null;
+  return true;
+}
+function rampBpm(t, to) {
+  const r = L.ramp; if (!r) return to;
+  const k = clamp((t - r.t0) / r.dur, 0, 1);
+  return r.from + (to - r.from) * k;
+}
+/* In free click with "Entrar sola": once the tempo has arrived, this bar becomes the announcing bar. */
+function autoEnter() {
+  if (!L.pre || !L.auto || L.pending) return;
+  if (L.ramp && L.nextTime < L.ramp.t0 + L.ramp.dur - 0.02) return;
+  L.pending = { sec: 0, mode: "bar", at: L.barNo + 1, auto: true };
 }
 function selectSong(idx) {
   if (!L.list.length) { L.idx = 0; L.song = null; return; }
@@ -709,31 +747,27 @@ function peekNext() {
   if (p && p.mode === "end") return { ...to(p), bar: 0, start: true, viaPending: true };
   if (L.loop) return { sec: L.sec, bar: 0, start: true, loop: true };
   if (L.sec + 1 < secs.length) return { sec: L.sec + 1, bar: 0, start: true };
-  if (cfg().autoNext && L.idx + 1 < L.list.length) return { song: L.idx + 1, sec: 0, bar: 0, start: true };
+  if (L.setId && L.idx + 1 < L.list.length) return { song: L.idx + 1, sec: 0, bar: 0, start: true }; // setlist: on to the next song's free click
   return { end: true };
 }
 function cueFor(n) {
   if (!n.start || n.loop) return null;
-  if (n.song != null && cfg().countIn > 0) return null; // the count-in of the new song carries its cue
+  if (n.song != null) return null; // a new song starts with free click; its cue comes when it goes in
   const song = n.song != null ? songById(L.list[n.song]) : L.song;
   return song && song.sections[n.sec] ? { cue: cueKeyFor(song, n.sec), key: (n.song ?? L.idx) + ":" + n.sec } : null;
 }
 function advance() {
   if (L.pre) {
     const n = peekNext(); L.barNo++; L.bar = 0;
-    if (n.count) return true;
-    L.pre = false; L.pending = null; L.sec = n.sec; return true;
+    if (n.count) { autoEnter(); return true; }
+    L.pre = false; L.pending = null; L.ramp = null; L.sec = n.sec; return true;
   }
   if (L.countLeft > 0) { L.countLeft--; L.bar = L.countLeft ? 0 : L.startBar || 0; L.barNo++; return true; }
   const n = peekNext(); // decided with the bar number of the bar that is ending, like every peek during it
   L.barNo++;
   if (n.end) return false;
   if (n.viaPending) { L.pending = null; L.loop = false; }
-  if (n.song != null) {
-    L.idx = n.song; L.song = cloneSong(songById(L.list[n.song])); saveLive();
-    L.countLeft = cfg().countIn;
-    if (!L.song || !L.song.sections.length) return false;
-  }
+  if (n.song != null) { if (!enterPre(n.song, L.nextTime)) return false; autoEnter(); return true; }
   L.sec = n.sec; L.bar = n.bar;
   return true;
 }
@@ -758,7 +792,8 @@ function schedule() {
       if (!advance()) { L.ending = true; L.queue.push({ t, stop: true }); clearInterval(L.timer); L.timer = null; return; }
     }
     const p = secParams(L.song, L.sec);
-    const bpm = ritBpm(p.bpm, p.beats);
+    const bpm = L.pre ? rampBpm(t, p.bpm) : ritBpm(p.bpm, p.beats);
+    L.lastBpm = bpm;
     if (L.beat === 0) L.cued = null;
     playBuf(L.beat === 0 && c.accent ? clickBuf.up : clickBuf.rim, c.clickVol, t);
     const cue = cueFor(peekNext());
@@ -784,7 +819,7 @@ async function start() {
   if (!L.song || !L.song.sections.length) { toast("Esta canción no tiene secciones. Añádelas en Canciones."); return; }
   L.playing = true; L.ending = false; L.bar = 0; L.beat = 0; L.barDone = false; L.cued = null; L.cueBeat = 0; L.barNo = 0; L.queue = []; L.ev = null;
   // From the live screen the click can run alone ("free click") until a section is tapped; the editor preview starts at once.
-  L.pre = !preview && cfg().preClick !== false; L.pending = null;
+  L.pre = !preview && cfg().preClick !== false; L.pending = null; L.ramp = null; L.auto = false;
   L.countLeft = L.pre ? 0 : cfg().countIn;
   L.nextTime = ctx.currentTime + (dev("safestart", false) ? 0.3 : 0.015);
   if (L.countLeft === 0 && !L.pre) { L.bar = L.startBar || 0; if (!L.bar) playCue(cueKeyFor(L.song, L.sec), L.nextTime); L.cued = "start"; }
@@ -795,7 +830,7 @@ async function start() {
 }
 function stop(finished) {
   L.playing = false; L.ending = false; clearInterval(L.timer); L.timer = null; L.queue = []; L.ev = null;
-  L.pending = null; L.countLeft = 0; L.pre = false; L.startBar = 0; L.bar = 0; L.beat = 0;
+  L.pending = null; L.countLeft = 0; L.pre = false; L.ramp = null; L.auto = false; L.startBar = 0; L.bar = 0; L.beat = 0;
   try { L.wake?.release(); } catch {} L.wake = null;
   if (preview) {
     // Listening from the song editor: put back the song and setlist the live screen had.
@@ -854,7 +889,8 @@ function jumpTo(sec) {
 function jumpSong(idx) {
   if (idx < 0 || idx >= L.list.length) return;
   if (!L.playing) { selectSong(idx); renderLive(); return; }
-  if (L.pre) { const b = L.beat; selectSong(idx); L.beat = b; L.pending = null; renderLive(); return; } // still on the free click: just change song
+  // Still on the free click: change song right away, sliding to its tempo, keeping the beat.
+  if (L.pre) { const b = L.beat; if (enterPre(idx, ctx.currentTime)) L.beat = b; renderLive(); return; }
   if (idx === L.idx) { L.pending = null; renderLive(); return; }
   const p = L.pending;
   L.pending = p && p.song === idx ? null : { song: idx, sec: 0, mode: cfg().mode, at: announceAt(true) };
@@ -863,7 +899,7 @@ function jumpSong(idx) {
 function toggleLoop() { if (!L.song) return; L.loop = !L.loop; renderLive(); }
 /* Bar number where an "aviso" jump lands: the next downbeat starts the announcing bar, the one after starts the section.
    A song change with a count-in already announces itself, so it starts on the next downbeat. */
-function announceAt(isSong) { return L.barNo + (isSong && cfg().countIn > 0 ? 1 : 2); }
+function announceAt(isSong) { return L.barNo + (isSong ? 1 : 2); } // a song change goes to free click: nothing to announce
 function setMode(m) { setCfg({ mode: m }); if (L.pending) { L.pending.mode = m; if (m === "bar") L.pending.at = announceAt(L.pending.song != null); } }
 
 /* ---------- UI state ---------- */
@@ -891,6 +927,7 @@ function safeRender() {
 const ICON_PLAY = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg>`;
 const ICON_STOP = `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>`;
 const ICON_LOOP = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12"/><path d="M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/></svg>`;
+const ICON_NEXT = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 5v14l11.5-7z"/><rect x="17.5" y="5" width="2.5" height="14" rx="1"/></svg>`;
 const ICON_REW = `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="5" width="2.5" height="14" rx="1"/><path d="M20 5v14L8.5 12z"/></svg>`;
 
 function renderLive() {
@@ -954,6 +991,7 @@ function renderLive() {
         <button class="tbtn" data-act="rewind" aria-label="Volver al principio">${ICON_REW}</button>
         <button class="play ${L.playing ? "stop" : ""}" data-act="play">${L.playing ? ICON_STOP + "Parar" : ICON_PLAY + "Tocar"}</button>
         <button class="tbtn loop" data-act="loop" aria-pressed="${L.loop}">${ICON_LOOP}Loop</button>
+        <button class="tbtn" data-act="next-song" ${L.idx >= L.list.length - 1 ? "disabled" : ""} aria-label="Siguiente canción">${ICON_NEXT}Siguiente</button>
         <div class="seg" role="group" aria-label="Cuándo saltar">
           <button data-act="mode" data-v="now" aria-pressed="${c.mode === "now"}">Siguiente compás</button>
           <button data-act="mode" data-v="bar" aria-pressed="${c.mode === "bar"}">Con aviso</button>
@@ -971,7 +1009,7 @@ function paintLive(force) {
   const playing = L.playing && L.ev;
   const e = playing ? L.ev : { song: L.song, idx: L.idx, sec: L.sec, bar: 0, beat: -1, pre: L.playing && L.pre, beats: secParams(L.song, L.sec).beats, bpm: secParams(L.song, L.sec).bpm, count: 0 };
   const song = e.song; if (!song) return;
-  const key = [e.idx, e.sec, e.bar, e.beat, e.count, e.pre, L.loop, JSON.stringify(L.pending), L.playing].join("|");
+  const key = [e.idx, e.sec, e.bar, e.beat, e.count, e.pre, L.auto, L.loop, JSON.stringify(L.pending), L.playing].join("|");
   if (key !== lastPaint || force) {
     lastPaint = key;
     const s = song.sections[e.sec], kd = kindOf(s.kind);
@@ -1005,7 +1043,13 @@ function paintLive(force) {
       const ns = songById(L.list[L.pending.song]);
       st.innerHTML = `<span class="tag">Siguiente</span> <b>${esc(ns ? ns.title : "")}</b> ${mode} · toca otra vez para cancelar`;
     } else if (L.pending) st.innerHTML = `<span class="tag">Salto</span> a <b>${esc(secLabel(song, L.pending.sec))}</b> ${mode} · toca otra vez para cancelar`;
-    else if (e.pre) st.innerHTML = `<span class="tag">Clic libre</span> toca una sección (por ejemplo <b>${esc(secLabel(song, 0))}</b>) para entrar con su aviso`;
+    else if (e.pre) {
+      const r = L.ramp, left = r ? r.t0 + r.dur - ctx.currentTime : 0, to = secParams(song, 0).bpm;
+      const tempo = r && left > 0 ? ` · tempo ${Math.round(r.from)} → ${to} en ${Math.ceil(left)} s` : "";
+      st.innerHTML = `<span class="tag">Clic libre</span> <b>${esc(song.title || "Sin título")}</b>${tempo} · ` + (L.auto
+        ? `entra sola con <b>${esc(secLabel(song, 0))}</b> al llegar al tempo <button class="btn small" data-act="hold">Esperar</button>`
+        : `toca <b>${esc(secLabel(song, 0))}</b> (u otra sección) para entrar`);
+    }
     else if (e.count) st.innerHTML = `Cuenta de entrada… empieza en <b>${esc(secLabel(song, e.sec))}</b>`;
     else if (L.loop) st.innerHTML = `<span class="tag">Loop</span> repitiendo <b>${esc(secLabel(song, e.sec))}</b> hasta quitarlo`;
     else if (!L.playing && !CUE_KEYS.some(k => cueSource(k.key)))
@@ -1205,9 +1249,19 @@ function renderSets() {
   let editor = `<div class="empty">Crea un setlist con las canciones del culto.</div>`;
   if (sl) {
     const its = sl.items || [];
+    const d = { ...TRANS_DEF, ...(sl.trans || {}) };
+    const secOpts = (sel, withDef) => (withDef ? `<option value="" ${sel == null ? "selected" : ""}>Por defecto (${d.sec ? d.sec + " s" : "directo"})</option>` : "")
+      + [0, 1, 2, 3, 4, 5, 6, 8, 10, 12].map(n => `<option value="${n}" ${sel === n ? "selected" : ""}>${n ? n + " s" : "Directo (0 s)"}</option>`).join("");
+    const autoOpts = (sel, withDef) => (withDef ? `<option value="" ${sel == null ? "selected" : ""}>Por defecto (${d.auto ? "entra sola" : "esperar"})</option>` : "")
+      + `<option value="0" ${sel === false ? "selected" : ""}>Esperar en clic libre</option><option value="1" ${sel === true ? "selected" : ""}>Entrar sola</option>`;
     const rows = its.map((it, i) => {
-      const s = songById(it.songId);
-      return `<div class="set-item" data-i="${i}"><span class="n">${i + 1}</span>
+      const s = songById(it.songId), prev = i > 0 && songById(its[i - 1].songId);
+      const own = it.trans != null || it.auto != null;
+      const trans = i === 0 ? "" : `<div class="trans-row ${own ? "own" : ""}" data-i="${i}"><span class="arrow">↝</span>
+        <span class="muted">${prev ? `${num(prev.bpm, 120)} → ${s ? num(s.bpm, 120) : "?"} BPM` : ""}</span>
+        <select data-it-trans aria-label="Transición hacia la canción ${i + 1}">${secOpts(it.trans ?? null, true)}</select>
+        <select data-it-auto aria-label="Al acabar la transición">${autoOpts(it.auto ?? null, true)}</select></div>`;
+      return `${trans}<div class="set-item" data-i="${i}"><span class="n">${i + 1}</span>
         <div style="min-width:0"><div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s ? s.title : "Canción borrada")}</div>
         <div class="muted mono" style="font-size:12px">${s ? `${num(s.bpm, 120)} BPM · ${(s.sections || []).length} secciones` : ""}</div></div>
         <div class="ctr"><button class="icon-btn" data-act="it-up" ${i === 0 ? "disabled" : ""} aria-label="Subir">↑</button><button class="icon-btn" data-act="it-down" ${i === its.length - 1 ? "disabled" : ""} aria-label="Bajar">↓</button><button class="icon-btn" data-act="it-del" aria-label="Quitar">✕</button></div></div>`;
@@ -1218,6 +1272,10 @@ function renderSets() {
     editor = `<div class="stack">
       <div class="row" style="align-items:end"><div class="field grow"><span class="label">Nombre</span><input type="text" id="f-setname" value="${esc(sl.name || "")}"></div>
         <button class="btn primary" data-act="play-set" ${its.length ? "" : "disabled"}>Tocar en directo</button></div>
+      <div class="card trans-def"><h3>Entre canciones</h3>
+        <div class="row"><span class="muted">El tempo se desliza en</span><select data-st="trans" style="width:auto">${secOpts(d.sec, false)}</select>
+          <span class="muted">y luego</span><select data-st="auto" style="width:auto">${autoOpts(d.auto, false)}</select></div>
+        <p class="muted" style="margin:0;font-size:13px">Vale para todas las canciones de este setlist. Entre dos canciones puedes cambiarlo solo para ese paso. «Esperar» deja el clic libre hasta que toques la sección; «Entrar sola» hace un compás de aviso y entra.</p></div>
       <div class="stack" style="gap:6px">${rows || `<div class="empty">Añade canciones desde la lista de abajo.</div>`}</div>
       <div class="field"><span class="label">Añadir canciones</span><input type="search" id="add-q" placeholder="Buscar en la biblioteca" value="${esc(UI.addQ)}"></div>
       <div class="results">${results || `<div class="empty">${Store.songs.length ? "Nada coincide." : "Primero crea canciones en Canciones."}</div>`}</div>
@@ -1261,8 +1319,7 @@ function renderSettings() {
         <div class="seg" role="group">${[0, 1, 2].map(n => `<button data-act="countin" data-v="${n}" aria-pressed="${c.countIn === n}">${n ? n + (n > 1 ? " compases" : " compás") : "Sin cuenta"}</button>`).join("")}</div></div>
       <label class="toggle"><span>Clic libre al tocar: el clic suena solo, los compases que quieras, hasta que toques una sección (por ejemplo Intro). Entonces entra con su aviso como cualquier salto.</span><input type="checkbox" data-cfg="preClick" ${c.preClick !== false ? "checked" : ""}></label>
       <label class="toggle"><span>Contar después de cada aviso («Chorus, two, three, four») y en la cuenta de entrada</span><input type="checkbox" data-cfg="voiceCount" ${c.voiceCount ? "checked" : ""}></label>
-      <label class="toggle"><span>Al acabar una canción, seguir con la siguiente del setlist</span><input type="checkbox" data-cfg="autoNext" ${c.autoNext ? "checked" : ""}></label>
-      <p class="muted" style="margin:0;font-size:13px">Si está apagado, el clic se para al final y la siguiente canción queda lista. Durante la canción también puedes tocar otra en el setlist para pasar a ella.</p>
+      <p class="muted" style="margin:0;font-size:13px">En un setlist, al acabar una canción (o al tocar otra) el clic sigue como clic libre con la siguiente ya cargada y el tempo se desliza al nuevo. El tiempo de transición y si entra sola se eligen en cada setlist.</p>
     </div>
     <div class="card">
       <div class="row"><h3 class="grow">Avisos de voz</h3><button class="btn small primary" data-act="cue-import">Importar avisos…</button></div>
@@ -1369,6 +1426,7 @@ document.addEventListener("click", async e => {
     case "play": if (L.playing) stop(false); else start(); break;
     case "pad": jumpTo(+el.dataset.i); break;
     case "loop": toggleLoop(); break;
+    case "hold": L.auto = false; if (L.pending && L.pending.auto) L.pending = null; renderLive(); break;
     case "mode": setMode(el.dataset.v); break;
     case "rewind": jumpTo(0); break;
     case "song": jumpSong(+el.dataset.i); break;
@@ -1443,6 +1501,12 @@ document.addEventListener("change", async e => {
     return;
   }
   if (t.id === "f-setname") { editSet(s => { s.name = t.value.trim() || "Setlist"; }); return; }
+  if (t.dataset.st) { editSet(s => { s.trans = { ...TRANS_DEF, ...(s.trans || {}), [t.dataset.st]: t.dataset.st === "auto" ? t.value === "1" : +t.value }; }); return; }
+  if (t.dataset.itTrans != null || t.dataset.itAuto != null) {
+    const i = +t.closest("[data-i]").dataset.i, k = t.dataset.itTrans != null ? "trans" : "auto";
+    editSet(s => { const it = s.items[i]; if (!it) return; if (t.value === "") delete it[k]; else it[k] = k === "auto" ? t.value === "1" : +t.value; });
+    return;
+  }
   if (t.dataset.cfg) { setCfg({ [t.dataset.cfg]: t.type === "checkbox" ? t.checked : Number(t.value) }); return; }
   if (t.dataset.dev) {
     setDev(t.dataset.dev, t.checked);
