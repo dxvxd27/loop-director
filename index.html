@@ -275,7 +275,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "15";
+const APP_VERSION = "16";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -370,6 +370,8 @@ const SB_TABLE = "loopdirector_docs";
 const LS_KEY = "loopdirector-v1";
 const Store = {
   songs: [], setlists: [], cues: [], config: null,
+  // Church library shared with you by its owner: its songs (ids "ch:<id>") and voice cues. Empty if none is shared with you.
+  church: { owner: null, email: "", songs: [], cues: [], last: null },
   session: null, pending: {}, lastSync: null, syncing: false, error: null, listeners: [],
   onChange(fn) { this.listeners.push(fn); },
   emit(what) { this.listeners.forEach(f => f(what)); },
@@ -378,12 +380,13 @@ const Store = {
       const l = JSON.parse(localStorage.getItem(LS_KEY) || "{}");
       this.songs = l.songs || []; this.setlists = l.setlists || []; this.cues = l.cues || []; this.config = l.config || null;
       this.session = l.session || null; this.pending = l.pending || {}; this.lastSync = l.lastSync || null;
+      if (l.church) this.church = { ...this.church, ...l.church };
     } catch {}
   },
   persist() {
     try {
       localStorage.setItem(LS_KEY, JSON.stringify({ songs: this.songs, setlists: this.setlists, cues: this.cues, config: this.config,
-        session: this.session, pending: this.pending, lastSync: this.lastSync }));
+        session: this.session, pending: this.pending, lastSync: this.lastSync, church: this.church }));
     } catch { toast("El dispositivo no tiene espacio para guardar más datos."); }
   },
   init() {
@@ -397,6 +400,12 @@ const Store = {
     setInterval(() => { if (!document.hidden) this.sync(); }, 30000);
   },
   applyLocal(coll, id, data, deleted) {
+    if (id.startsWith("ch:")) { // church library
+      const arr = this.church[coll]; if (!arr) return;
+      const i = arr.findIndex(x => x.id === id);
+      if (deleted) { if (i >= 0) arr.splice(i, 1); } else { const row = { id, ...data, church: true }; if (i >= 0) arr[i] = row; else arr.push(row); }
+      this.emit(coll); return;
+    }
     if (coll === "config") { this.config = deleted ? null : data; this.emit("config"); return; }
     if (!this[coll]) return;
     const arr = this[coll]; const i = arr.findIndex(x => x.id === id);
@@ -405,8 +414,9 @@ const Store = {
     this.emit(coll);
   },
   queue(coll, id, data, deleted) {
+    if (data) { const { church: _c, ...rest } = data; data = rest; }
     this.applyLocal(coll, id, data, deleted);
-    this.pending[coll + "/" + id] = { coll, id, data: data || {}, deleted };
+    this.pending[coll + "/" + id] = { coll, id, data: data || {}, deleted, owner: id.startsWith("ch:") ? this.church.owner : undefined };
     this.persist(); setSync(); this.sync();
   },
   put(coll, id, data) { const { id: _drop, ...rest } = data; this.queue(coll, id, rest, false); },
@@ -427,7 +437,8 @@ const Store = {
     this.lastSync = null; this.error = null; this.persist(); setSync();
     await this.sync();
   },
-  signOut() { this.session = null; this.lastSync = null; this.error = null; this.persist(); setSync(); },
+  signOut() { this.session = null; this.lastSync = null; this.error = null; this.church = { owner: null, email: "", songs: [], cues: [], last: null }; this.persist(); this.emit("songs"); setSync(); },
+  uid() { try { return JSON.parse(atob(this.session.access.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))).sub; } catch { return null; } },
   async token() {
     if (!this.session) return null;
     if (Date.now() > this.session.exp - 60000) {
@@ -439,9 +450,9 @@ const Store = {
     }
     return this.session.access;
   },
-  async rest(method, query, body) {
+  async rest(method, query, body, table) {
     const t = await this.token(); if (!t) throw new Error("Sin sesión");
-    const r = await fetch(SB_URL + "/rest/v1/" + SB_TABLE + query, {
+    const r = await fetch(SB_URL + "/rest/v1/" + (table || SB_TABLE) + query, {
       method, body: body ? JSON.stringify(body) : undefined,
       headers: { apikey: SB_KEY, Authorization: "Bearer " + t, "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" },
     });
@@ -449,25 +460,51 @@ const Store = {
     if (!r.ok) throw new Error("HTTP " + r.status);
     return method === "GET" ? r.json() : null;
   },
+  /* The church library someone shared with you: who owns it, then its songs and cues changed since last time. */
+  async syncChurch() {
+    const email = (this.session.email || "").toLowerCase();
+    const shares = await this.rest("GET", "?select=owner,owner_email&member_email=eq." + encodeURIComponent(email) + "&order=created_at.asc", null, "loopdirector_shares");
+    const sh = shares[0] || null;
+    if (!sh || sh.owner !== this.church.owner) {
+      this.church = { owner: sh ? sh.owner : null, email: sh ? sh.owner_email : "", songs: [], cues: [], last: null };
+      for (const k of Object.keys(this.pending)) if (this.pending[k].id.startsWith("ch:")) delete this.pending[k];
+      this.emit("songs"); this.emit("cues");
+      if (!sh) return;
+    }
+    let q = "?select=coll,id,data,deleted,updated_at&coll=in.(songs,cues)&order=updated_at.asc&user_id=eq." + sh.owner;
+    if (this.church.last) q += "&updated_at=gt." + encodeURIComponent(this.church.last);
+    const rows = await this.rest("GET", q);
+    for (const r of rows) {
+      if (!this.pending[r.coll + "/ch:" + r.id]) this.applyLocal(r.coll, "ch:" + r.id, r.data, r.deleted);
+      this.church.last = r.updated_at;
+    }
+  },
   async sync() {
     if (!this.session || this.syncing || !navigator.onLine) { setSync(); return; }
     this.syncing = true; setSync();
     try {
-      const ops = Object.values(this.pending);
-      // Upload in small batches: voice cues are ~40 KB each and one big request could be refused.
-      for (let s = 0; s < ops.length; s += 4) {
-        const part = ops.slice(s, s + 4);
-        await this.rest("POST", "?on_conflict=user_id,coll,id", part.map(o => ({ coll: o.coll, id: o.id, data: o.data, deleted: o.deleted })));
-        for (const o of part) { const k = o.coll + "/" + o.id; if (this.pending[k] === o) delete this.pending[k]; }
-        this.persist();
+      const me = this.uid();
+      const all = Object.values(this.pending);
+      // Your own rows, then the church rows (written into the owner's library), in small batches:
+      // voice cues are ~40 KB each and one big request could be refused.
+      for (const ops of [all.filter(o => !o.id.startsWith("ch:")), all.filter(o => o.id.startsWith("ch:"))]) {
+        for (let s = 0; s < ops.length; s += 4) {
+          const part = ops.slice(s, s + 4);
+          await this.rest("POST", "?on_conflict=user_id,coll,id", part.map(o => o.id.startsWith("ch:")
+            ? { user_id: o.owner || this.church.owner, coll: o.coll, id: o.id.slice(3), data: o.data, deleted: o.deleted }
+            : { coll: o.coll, id: o.id, data: o.data, deleted: o.deleted }));
+          for (const o of part) { const k = o.coll + "/" + o.id; if (this.pending[k] === o) delete this.pending[k]; }
+          this.persist();
+        }
       }
-      let q = "?select=coll,id,data,deleted,updated_at&order=updated_at.asc";
+      let q = "?select=coll,id,data,deleted,updated_at&order=updated_at.asc" + (me ? "&user_id=eq." + me : "");
       if (this.lastSync) q += "&updated_at=gt." + encodeURIComponent(this.lastSync);
       const rows = await this.rest("GET", q);
       for (const r of rows) {
         if (!this.pending[r.coll + "/" + r.id]) this.applyLocal(r.coll, r.id, r.data, r.deleted);
         this.lastSync = r.updated_at;
       }
+      await this.syncChurch();
       this.error = null; this.persist();
     } catch (e) { this.error = e.message || "error"; }
     this.syncing = false; setSync();
@@ -504,7 +541,8 @@ function renderAccount() {
       </form>`}
   </div></div>`;
 }
-const songById = id => Store.songs.find(s => s.id === id);
+const songById = id => Store.songs.find(s => s.id === id) || Store.church.songs.find(s => s.id === id);
+const churchSongs = () => Store.church.songs.slice().sort((a, b) => (a.title || "").localeCompare(b.title || "", "es", { sensitivity: "base" }));
 const sortedSongs = () => Store.songs.slice().sort((a, b) => (a.title || "").localeCompare(b.title || "", "es", { sensitivity: "base" }));
 
 /* ---------- Audio (unlock, jack-adapter keep-awake and sounds come from Pulso Libre) ---------- */
@@ -623,7 +661,7 @@ async function loadClicks() {
 }
 /* Which file a cue comes from: your own upload first, then the built-in cue pack. */
 function cueSource(key) {
-  const own = Store.cues.find(c => c.id === key);
+  const own = Store.cues.find(c => c.id === key) || Store.church.cues.find(c => c.id === "ch:" + key); // yours, else the church library's
   if (own && own.pcm) return { own };
   const b = window.BUILTIN_CUES && window.BUILTIN_CUES[key];
   return b ? { builtin: b } : null;
@@ -638,7 +676,7 @@ async function decodeCue(src) {
   const u = b64ToBytes(src.builtin);
   return trimStart(parseWav(u) || await decodeAudio(u.buffer));
 }
-function cueStamp() { return Store.cues.map(c => c.id + ":" + (c.pcm ? c.pcm.length : 0)).join(","); }
+function cueStamp() { return Store.cues.concat(Store.church.cues).map(c => c.id + ":" + (c.pcm ? c.pcm.length : 0)).join(","); }
 function loadCues() {
   if (!ctx) return Promise.resolve();
   const stamp = cueStamp();
@@ -673,7 +711,9 @@ const cloneSong = s => s ? JSON.parse(JSON.stringify({ ...s, sections: (s.sectio
 function saveLive() { try { localStorage.setItem("loopdirector-live", JSON.stringify({ setId: L.setId, songId: L.list[L.idx] || null })); } catch {} }
 function buildList() {
   const sl = L.setId && Store.setlists.find(s => s.id === L.setId);
-  if (L.setId && !sl) L.setId = null;
+  if (L.setId === "church" && !Store.church.owner) L.setId = null;
+  if (L.setId && L.setId !== "church" && !sl) L.setId = null;
+  if (L.setId === "church") { L.items = []; L.list = churchSongs().map(s => s.id); return; }
   L.items = sl ? (sl.items || []).filter(it => songById(it.songId)) : [];
   L.list = sl ? L.items.map(it => it.songId) : sortedSongs().map(s => s.id);
 }
@@ -747,11 +787,11 @@ function peekNext() {
   if (p && p.mode === "end") return { ...to(p), bar: 0, start: true, viaPending: true };
   if (L.loop) return { sec: L.sec, bar: 0, start: true, loop: true };
   if (L.sec + 1 < secs.length) return { sec: L.sec + 1, bar: 0, start: true };
-  if (L.setId && L.idx + 1 < L.list.length) return { song: L.idx + 1, sec: 0, bar: 0, start: true }; // setlist: on to the next song's free click
+  if (L.items && L.items.length && L.idx + 1 < L.list.length) return { song: L.idx + 1, sec: 0, bar: 0, start: true }; // setlist: on to the next song's free click
   return { end: true };
 }
 function cueFor(n) {
-  if (!n.start || n.loop) return null;
+  if (!n.start) return null; // a loop also announces its section again in its last bar
   if (n.song != null) return null; // a new song starts with free click; its cue comes when it goes in
   const song = n.song != null ? songById(L.list[n.song]) : L.song;
   return song && song.sections[n.sec] ? { cue: cueKeyFor(song, n.sec), key: (n.song ?? L.idx) + ":" + n.sec } : null;
@@ -938,7 +978,8 @@ function renderLive() {
   if (UI.tab !== "live") return;
   const v = $("#view");
   const sl = L.setId && Store.setlists.find(s => s.id === L.setId);
-  const setOpts = `<option value="">Toda la biblioteca</option>` + Store.setlists.slice().sort((a, b) => (a.name || "").localeCompare(b.name || "", "es"))
+  const setOpts = `<option value="">${Store.church.owner ? "Mis canciones" : "Toda la biblioteca"}</option>`
+    + (Store.church.owner ? `<option value="church" ${L.setId === "church" ? "selected" : ""}>Biblioteca de la iglesia</option>` : "") + Store.setlists.slice().sort((a, b) => (a.name || "").localeCompare(b.name || "", "es"))
     .map(s => `<option value="${esc(s.id)}" ${s.id === L.setId ? "selected" : ""}>${esc(s.name || "Setlist")}</option>`).join("");
   const rows = L.list.map((id, i) => {
     const s = songById(id); if (!s) return "";
@@ -1096,7 +1137,7 @@ function frame() {
 
 /* ---------- Songs editor ---------- */
 function newSong() {
-  const id = uid();
+  const id = (Store.church.owner && UI.lib === "church" ? "ch:" : "") + uid();
   Store.put("songs", id, { title: "Canción nueva", bpm: 72, beats: 4, unit: 4, sections: [
     { id: uid(), kind: "intro", bars: 4 }, { id: uid(), kind: "verse", bars: 8 }, { id: uid(), kind: "chorus", bars: 8 }] });
   UI.songId = id; UI.tab = "songs"; switchTab("songs");
@@ -1132,7 +1173,9 @@ function editSong(fn) {
 function renderSongs() {
   const v = $("#view");
   const q = UI.songQ.trim().toLowerCase();
-  const list = sortedSongs().filter(s => !q || (s.title || "").toLowerCase().includes(q));
+  const church = !!Store.church.owner && UI.lib === "church";
+  if (UI.songId && songById(UI.songId) && !!songById(UI.songId).church !== church) UI.songId = null;
+  const list = (church ? churchSongs() : sortedSongs()).filter(s => !q || (s.title || "").toLowerCase().includes(q));
   if (!UI.songId || !songById(UI.songId)) UI.songId = list[0]?.id || null;
   const song = songById(UI.songId);
   const items = list.map(s => `<button class="li ${s.id === UI.songId ? "active" : ""}" data-act="pick-song" data-id="${esc(s.id)}">
@@ -1228,7 +1271,7 @@ function renderSongs() {
       <p class="muted" style="margin:0;font-size:13px">Toca o arrastra la regla de los números para mover el cursor amarillo y escuchar desde ese compás. Arrastra el borde derecho de un bloque (‖) para darle más o menos compases. Cada rayita es un compás y las líneas gruesas marcan grupos de 4. Normalmente las intros y finales tienen 4 u 8 compases, y las estrofas y coros 8 o 16.</p>
       <div class="stack" style="gap:8px"><span class="label">Añadir sección al final</span><div class="add-chips">${chips}</div></div>
       ${insp}
-      <div class="row" style="justify-content:flex-end"><button class="btn danger" data-act="del-song">Borrar canción</button></div>
+      <div class="row" style="justify-content:flex-end">${Store.church.owner ? `<button class="btn" data-act="copy-song">${song.church ? "Copiar a mis canciones" : "Copiar a la iglesia"}</button>` : ""}<button class="btn danger" data-act="del-song">Borrar canción</button></div>
     </div>`;
   }
   // Keep where each panel was scrolled: every edit redraws the editor.
@@ -1236,8 +1279,9 @@ function renderSongs() {
   const sameSong = v.dataset.song === UI.songId; v.dataset.song = UI.songId || "";
   v.innerHTML = `<section class="split">
     <div class="pane"><div class="pane-head"><div class="row"><h2 class="grow">Canciones</h2><button class="btn primary small" data-act="new-song">+ Nueva</button></div>
+      ${Store.church.owner ? `<div class="seg" role="group" aria-label="Biblioteca"><button data-act="lib" data-v="mine" aria-pressed="${!church}">Mis canciones</button><button data-act="lib" data-v="church" aria-pressed="${church}">Iglesia</button></div>` : ""}
       <input type="search" id="song-q" placeholder="Buscar" value="${esc(UI.songQ)}" aria-label="Buscar canciones">
-      <button class="btn small" data-act="import-pulso">Importar de Pulso Libre</button></div>
+      ${church ? `<p class="muted" style="margin:0;font-size:12px">Biblioteca de ${esc(Store.church.email || "la iglesia")}. Lo que cambies aquí lo ven todos.</p>` : `<button class="btn small" data-act="import-pulso">Importar de Pulso Libre</button>`}</div>
       <div class="pane-body" style="padding:0">${items || `<div class="empty">${q ? "Nada coincide." : "Aún no hay canciones."}</div>`}</div></div>
     <div class="pane"><div class="pane-body">${editor}</div></div>
   </section>`;
@@ -1273,8 +1317,8 @@ function renderSets() {
         <div class="ctr"><button class="icon-btn" data-act="it-up" ${i === 0 ? "disabled" : ""} aria-label="Subir">↑</button><button class="icon-btn" data-act="it-down" ${i === its.length - 1 ? "disabled" : ""} aria-label="Bajar">↓</button><button class="icon-btn" data-act="it-del" aria-label="Quitar">✕</button></div></div>`;
     }).join("");
     const q = UI.addQ.trim().toLowerCase();
-    const results = sortedSongs().filter(s => !q || (s.title || "").toLowerCase().includes(q)).slice(0, 40)
-      .map(s => `<button class="li" data-act="it-add" data-id="${esc(s.id)}"><span class="t">${esc(s.title || "Sin título")}</span><span class="s mono">+ añadir</span></button>`).join("");
+    const results = sortedSongs().concat(churchSongs()).filter(s => !q || (s.title || "").toLowerCase().includes(q)).slice(0, 40)
+      .map(s => `<button class="li" data-act="it-add" data-id="${esc(s.id)}"><span class="t">${esc(s.title || "Sin título")}</span><span class="s mono">${s.church ? "Iglesia · " : ""}+ añadir</span></button>`).join("");
     editor = `<div class="stack">
       <div class="row" style="align-items:end"><div class="field grow"><span class="label">Nombre</span><input type="text" id="f-setname" value="${esc(sl.name || "")}"></div>
         <button class="btn primary" data-act="play-set" ${its.length ? "" : "disabled"}>Tocar en directo</button></div>
@@ -1300,17 +1344,52 @@ function editSet(fn) {
   fn(copy); Store.put("setlists", copy.id, copy);
 }
 
+/* ---------- Sharing the church library ----------
+   Your songs and voice cues are the church library. People you give access to (by the email of their account)
+   see it, play it, edit and create songs in it, and keep their own songs apart. */
+let shareList = null;
+function shareCard() {
+  if (!Store.session) return `<h3>Biblioteca de la iglesia</h3><p class="muted" style="margin:0">Inicia sesión para compartir tus canciones con otra persona.</p>`;
+  if (Store.church.owner) return `<h3>Biblioteca de la iglesia</h3>
+    <p style="margin:0">Tienes acceso a la biblioteca de <b>${esc(Store.church.email || "otra cuenta")}</b>: sus canciones están en Canciones → «Iglesia» y sus avisos de voz suenan también aquí. Puedes editar y crear canciones en ella; lo que cambies lo ven todos. Tus canciones de «Mis canciones» son solo tuyas.</p>`;
+  if (shareList == null) { loadShares(); return `<h3>Compartir mis canciones</h3><p class="muted" style="margin:0">Cargando…</p>`; }
+  const rows = shareList.map(m => `<div class="row"><span class="grow mono" style="font-size:14px">${esc(m.member_email)}</span><button class="icon-btn" data-act="share-del" data-e="${esc(m.member_email)}" aria-label="Quitar acceso a ${esc(m.member_email)}">✕</button></div>`).join("");
+  return `<h3>Compartir mis canciones</h3>
+    <p class="muted" style="margin:0;font-size:13px">Tus canciones y avisos de voz son la biblioteca de la iglesia. Quien tenga acceso la ve en Canciones → «Iglesia», puede tocarla, editarla y crear canciones nuevas en ella, y además tiene sus propias canciones aparte. Tus setlists y ajustes siguen siendo solo tuyos.</p>
+    ${rows || `<p class="muted" style="margin:0">Aún no la compartes con nadie.</p>`}
+    <form class="row" id="share-form"><input type="email" id="share-email" placeholder="Correo de su cuenta de EasyPlan" required style="flex:1;min-width:200px" autocomplete="off"><button class="btn primary" type="submit">Dar acceso</button></form>`;
+}
+async function loadShares() {
+  try { shareList = await Store.rest("GET", "?select=member_email&owner=eq." + Store.uid() + "&order=created_at.asc", null, "loopdirector_shares"); }
+  catch { shareList = []; toast("No se pudo cargar con quién compartes. Revisa la conexión."); }
+  const c = $("#share-card"); if (c) c.innerHTML = shareCard();
+}
+async function addShare(email) {
+  email = email.trim().toLowerCase();
+  if (!email || email === (Store.session.email || "").toLowerCase()) return;
+  try { await Store.rest("POST", "?on_conflict=owner,member_email", [{ member_email: email, owner_email: Store.session.email || "" }], "loopdirector_shares"); toast("Acceso dado a " + email + ". Lo verá al iniciar sesión."); }
+  catch { toast("No se pudo dar acceso. Revisa la conexión."); }
+  shareList = null; const c = $("#share-card"); if (c) c.innerHTML = shareCard();
+}
+async function delShare(email) {
+  if (!confirm(`¿Quitar el acceso de ${email} a tus canciones?`)) return;
+  try { await Store.rest("DELETE", "?owner=eq." + Store.uid() + "&member_email=eq." + encodeURIComponent(email), null, "loopdirector_shares"); }
+  catch { toast("No se pudo quitar el acceso. Revisa la conexión."); }
+  shareList = null; const c = $("#share-card"); if (c) c.innerHTML = shareCard();
+}
+
 /* ---------- Settings ---------- */
 function renderSettings() {
   const c = cfg();
   const cueRows = CUE_KEYS.map(k => {
     const src = cueSource(k.key);
-    const st = !src ? "Sin aviso" : src.own ? "Tuyo" : "Incluido";
+    const fromChurch = src && src.own && src.own.id.startsWith("ch:");
+    const st = !src ? "Sin aviso" : fromChurch ? "De la iglesia" : src.own ? "Tuyo" : "Incluido";
     return `<div class="cue-row" style="--c:${k.c}"><span class="sw"></span>
       <div><div style="font-weight:600">${esc(k.name)}</div><div class="st">${st}</div></div>
       <div class="row"><button class="btn small" data-act="cue-play" data-k="${k.key}" ${src ? "" : "disabled"} aria-label="Escuchar ${esc(k.name)}">▶</button>
         <button class="btn small" data-act="cue-up" data-k="${k.key}">Subir</button>
-        ${src && src.own ? `<button class="btn small danger" data-act="cue-del" data-k="${k.key}">Quitar</button>` : ""}</div></div>`;
+        ${src && src.own && !fromChurch ? `<button class="btn small danger" data-act="cue-del" data-k="${k.key}">Quitar</button>` : ""}</div></div>`;
   }).join("");
   $("#view").innerHTML = `<section class="settings">
     <div class="card">
@@ -1327,6 +1406,7 @@ function renderSettings() {
       <label class="toggle"><span>Contar después de cada aviso («Chorus, two, three, four») y en la cuenta de entrada</span><input type="checkbox" data-cfg="voiceCount" ${c.voiceCount ? "checked" : ""}></label>
       <p class="muted" style="margin:0;font-size:13px">En un setlist, al acabar una canción (o al tocar otra) el clic sigue como clic libre con la siguiente ya cargada y el tempo se desliza al nuevo. El tiempo de transición y si entra sola se eligen en cada setlist.</p>
     </div>
+    <div class="card" id="share-card">${shareCard()}</div>
     <div class="card">
       <div class="row"><h3 class="grow">Avisos de voz</h3><button class="btn small primary" data-act="cue-import">Importar avisos…</button></div>
       <p class="muted" style="margin:0;font-size:13px">«Importar avisos» acepta varios archivos a la vez y los reconoce por el nombre (INTRO, VERSE, VERSE 2, PRE CHORUS, CHORUS, CHORUS 2, BRIDGE, END, ONE, TWO…), como los WAV del cue pack. «Subir» cambia uno solo. Se recorta el silencio del principio para que entren a tempo y se guardan en tu cuenta, no en la web.</p>
@@ -1462,7 +1542,16 @@ document.addEventListener("click", async e => {
     case "add-sec": editSong(s => { const k = el.dataset.k; s.sections.push({ id: uid(), kind: k, bars: ["intro", "outro", "prechorus", "tag", "ending", "turnaround"].includes(k) ? 4 : 8 }); UI.selSec = s.sections.length - 1; });
       setTimeout(() => { const w = $(".arr-wrap"); if (w) w.scrollLeft = w.scrollWidth; }, 0); break;
     case "play-song": chooseSet(null, UI.songId); switchTab("live"); break;
-    case "del-song": { const s = songById(UI.songId); if (s && confirm(`¿Borrar «${s.title || "Sin título"}»?`)) { Store.del("songs", s.id); UI.songId = null; } break; }
+    case "lib": UI.lib = el.dataset.v; UI.songId = null; renderSongs(); break;
+    case "copy-song": {
+      const s = songById(UI.songId); if (!s) break;
+      const { id: _i, church: _c, ...data } = JSON.parse(JSON.stringify(s));
+      const id = (s.church ? "" : "ch:") + uid();
+      Store.put("songs", id, data); UI.lib = s.church ? "mine" : "church"; UI.songId = id; renderSongs();
+      toast(s.church ? "Copiada a tus canciones." : "Copiada a la biblioteca de la iglesia."); break;
+    }
+    case "share-del": delShare(el.dataset.e); break;
+    case "del-song": { const s = songById(UI.songId); if (s && confirm(s.church ? `¿Borrar «${s.title || "Sin título"}» de la biblioteca de la iglesia? Se borra para todos.` : `¿Borrar «${s.title || "Sin título"}»?`)) { Store.del("songs", s.id); UI.songId = null; } break; }
     // setlists
     case "new-set": { const id = uid(); Store.put("setlists", id, { name: "Culto " + new Date().toLocaleDateString("es-ES", { day: "numeric", month: "short" }), items: [] }); UI.setId = id; renderSets(); break; }
     case "pick-set": UI.setId = el.dataset.id; UI.addQ = ""; renderSets(); break;
@@ -1546,6 +1635,7 @@ document.addEventListener("input", e => {
 });
 document.addEventListener("focusout", () => { if (deferred) setTimeout(() => { const a = document.activeElement; if (!(a && $("#view").contains(a) && /INPUT|SELECT/.test(a.tagName))) { deferred = false; render(); } }, 0); });
 document.addEventListener("submit", async e => {
+  if (e.target.id === "share-form") { e.preventDefault(); addShare($("#share-email").value); return; }
   if (e.target.id !== "login-form") return;
   e.preventDefault();
   const btn = $("#acc-submit"), err = $("#acc-err");
