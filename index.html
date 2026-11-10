@@ -275,7 +275,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "14";
+const APP_VERSION = "15";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -822,7 +822,8 @@ async function start() {
   const armed = !preview && L.armed != null && L.song.sections[L.armed] ? L.armed : null;
   if (armed != null) L.sec = armed;
   L.pre = !preview && armed == null && cfg().preClick !== false; L.pending = null; L.ramp = null; L.auto = false; L.armed = null;
-  L.countLeft = L.pre ? 0 : cfg().countIn;
+  // A chosen section follows the live mode: «Con aviso» / «Final de sección» always give it one bar of cue and count first.
+  L.countLeft = L.pre ? 0 : armed != null && cfg().mode !== "now" ? Math.max(1, cfg().countIn) : cfg().countIn;
   L.nextTime = ctx.currentTime + (dev("safestart", false) ? 0.3 : 0.015);
   if (L.countLeft === 0 && !L.pre) { L.bar = L.startBar || 0; if (!L.bar) playCue(cueKeyFor(L.song, L.sec), L.nextTime); L.cued = "start"; }
   schedule();
@@ -1059,7 +1060,8 @@ function paintLive(force) {
     else if (!L.playing && !CUE_KEYS.some(k => cueSource(k.key)))
       st.innerHTML = `<span class="tag">Sin avisos de voz</span> Impórtalos una vez en <button class="btn small" data-act="go-settings">Ajustes → Importar avisos</button>`;
     else if (idleFree) st.innerHTML = `«Tocar» empieza con clic libre y entras tocando una sección. O elige ahora una sección para empezar directamente en ella.`;
-    else if (!L.playing) st.innerHTML = `Empieza en <b>${esc(secLabel(song, e.sec))}</b>${cfg().countIn ? ` tras ${cfg().countIn} ${cfg().countIn > 1 ? "compases" : "compás"} de cuenta` : ""}.${L.armed != null ? " Toca otra sección para cambiarla, o la misma para quitarla." : " Toca una sección para elegir otra."}`;
+    else if (!L.playing) { const ci = L.armed != null && cfg().mode !== "now" ? Math.max(1, cfg().countIn) : cfg().countIn;
+      st.innerHTML = `Empieza en <b>${esc(secLabel(song, e.sec))}</b>${ci ? ` tras ${ci} ${ci > 1 ? "compases" : "compás"} de aviso` : ""}.${L.armed != null ? " Toca otra sección para cambiarla, o la misma para quitarla." : " Toca una sección para elegir otra."}`; }
     else {
       const left = s.bars - e.bar - 1, nx = e.sec + 1 < song.sections.length ? secLabel(song, e.sec + 1) : null;
       st.innerHTML = nx ? `Luego <b>${esc(nx)}</b>${left ? ` en ${left} ${left > 1 ? "compases" : "compás"}` : " en el siguiente compás"}` : `Última sección${left ? ` · quedan ${left} ${left > 1 ? "compases" : "compás"}` : ""}`;
