@@ -168,8 +168,11 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 /* Song structure: one block per section, width = bars. Drag the right edge to change the bars. */
 .arr-wrap { overflow-x: auto; overflow-y: hidden; padding: 2px 0 8px; -webkit-overflow-scrolling: touch; }
 .arr { position: relative; width: max-content; min-width: 100%; }
-.ruler { position: relative; height: 18px; }
-.ruler span { position: absolute; top: 0; padding-left: 3px; border-left: 1px solid var(--line); font-family: var(--mono); font-size: 11px; color: var(--muted); line-height: 16px; }
+.ruler { position: relative; height: 30px; touch-action: none; cursor: col-resize; border-radius: 6px; background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.pcur { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px solid var(--led); z-index: 3; pointer-events: none; }
+.pcur::before { content: ""; position: absolute; left: -9px; top: 0; border: 8px solid transparent; border-top: 13px solid var(--led); }
+.pcur b { position: absolute; left: 8px; top: 2px; padding: 1px 6px; border-radius: 5px; background: var(--led); color: var(--led-ink); font-size: 11px; font-weight: 800; white-space: nowrap; }
+.ruler span { position: absolute; top: 7px; pointer-events: none; padding-left: 3px; border-left: 1px solid var(--line); font-family: var(--mono); font-size: 11px; color: var(--muted); line-height: 16px; }
 .arr-row { display: flex; height: 104px; }
 .ablk { position: relative; flex: none; height: 100%; border: 0; border-radius: 10px; padding: 7px 30px 7px 9px; text-align: left; overflow: hidden;
   background: color-mix(in srgb, var(--c) 24%, var(--surface)); box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--c) 55%, transparent); }
@@ -267,7 +270,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "11";
+const APP_VERSION = "12";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -697,7 +700,7 @@ function peekNext() {
   // Free click before the song: bars of click alone until a section is tapped; then it goes in like any jump.
   if (L.pre) return p && (p.mode !== "bar" || L.barNo + 1 >= (p.at || 0)) ? { ...to(p), bar: 0, start: true, viaPending: true } : { count: true };
   if (L.countLeft > 1) return { count: true };
-  if (L.countLeft === 1) return { sec: L.sec, bar: 0, start: true };
+  if (L.countLeft === 1) return { sec: L.sec, bar: L.startBar || 0, start: !L.startBar }; // mid-section start: plain count, no section cue
   // "Con aviso": the bar after the tap announces the section (cue + "two, three, four"); the section starts the bar after.
   if (p && p.mode === "bar" && L.barNo + 1 >= (p.at || 0)) return { ...to(p), bar: 0, start: true, viaPending: true };
   // "Siguiente compás": straight in on the next downbeat; the cue sounds on the next beat after the tap.
@@ -721,7 +724,7 @@ function advance() {
     if (n.count) return true;
     L.pre = false; L.pending = null; L.sec = n.sec; return true;
   }
-  if (L.countLeft > 0) { L.countLeft--; L.bar = 0; L.barNo++; return true; }
+  if (L.countLeft > 0) { L.countLeft--; L.bar = L.countLeft ? 0 : L.startBar || 0; L.barNo++; return true; }
   const n = peekNext(); // decided with the bar number of the bar that is ending, like every peek during it
   L.barNo++;
   if (n.end) return false;
@@ -784,7 +787,7 @@ async function start() {
   L.pre = !preview && cfg().preClick !== false; L.pending = null;
   L.countLeft = L.pre ? 0 : cfg().countIn;
   L.nextTime = ctx.currentTime + (dev("safestart", false) ? 0.3 : 0.015);
-  if (L.countLeft === 0 && !L.pre) { playCue(cueKeyFor(L.song, L.sec), L.nextTime); L.cued = "start"; }
+  if (L.countLeft === 0 && !L.pre) { L.bar = L.startBar || 0; if (!L.bar) playCue(cueKeyFor(L.song, L.sec), L.nextTime); L.cued = "start"; }
   schedule();
   L.timer = setInterval(schedule, 25);
   try { navigator.wakeLock?.request("screen").then(w => { L.wake = w; }, () => {}); } catch {}
@@ -792,7 +795,7 @@ async function start() {
 }
 function stop(finished) {
   L.playing = false; L.ending = false; clearInterval(L.timer); L.timer = null; L.queue = []; L.ev = null;
-  L.pending = null; L.countLeft = 0; L.pre = false; L.bar = 0; L.beat = 0;
+  L.pending = null; L.countLeft = 0; L.pre = false; L.startBar = 0; L.bar = 0; L.beat = 0;
   try { L.wake?.release(); } catch {} L.wake = null;
   if (preview) {
     // Listening from the song editor: put back the song and setlist the live screen had.
@@ -809,13 +812,22 @@ function stop(finished) {
 }
 /* "Escuchar" in the song editor: play the song being edited from the selected section, without touching the live setlist. */
 let preview = null;
-async function togglePreview() {
+/* Editor cursor: one bar of the whole song (0-based), set by tapping or dragging the ruler. */
+function cursorAt(song) {
+  const secs = song.sections || [], total = secs.reduce((a, x) => a + (x.bars || 1), 0);
+  let b = clamp(UI.cursor && UI.cursor.song === song.id ? UI.cursor.bar : 0, 0, Math.max(0, total - 1)), sec = 0;
+  const abs = b;
+  while (sec < secs.length - 1 && b >= (secs[sec].bars || 1)) { b -= secs[sec].bars || 1; sec++; }
+  return { sec, bar: b, abs };
+}
+async function togglePreview(fromCursor) {
   if (L.playing) { stop(false); return; }
   const song = songById(UI.songId);
   if (!song || !(song.sections || []).length) { toast("Añade al menos una sección para escuchar."); return; }
   preview = { setId: L.setId, songId: L.list[L.idx] || null };
   L.list = [song.id]; L.idx = 0; L.song = cloneSong(song);
-  L.sec = clamp(UI.selSec || 0, 0, L.song.sections.length - 1); L.pending = null; L.loop = false;
+  L.sec = clamp(UI.selSec || 0, 0, L.song.sections.length - 1); L.startBar = 0; L.pending = null; L.loop = false;
+  if (fromCursor) { const c = cursorAt(song); L.sec = c.sec; L.startBar = c.bar; }
   await start();
   if (!L.playing) { stop(false); return; } // audio blocked or no sections: restore the live screen
   renderSongs();
@@ -834,7 +846,7 @@ function paintEditor() {
 function jumpTo(sec) {
   if (!L.song || !L.song.sections[sec]) return;
   if (!L.playing) { L.sec = sec; L.bar = 0; renderLive(); return; }
-  if (L.countLeft > 0 && !L.pending && !L.pre) { L.sec = sec; L.cued = null; renderLive(); return; } // nothing played yet: just start there
+  if (L.countLeft > 0 && !L.pending && !L.pre) { L.sec = sec; L.startBar = 0; L.cued = null; renderLive(); return; } // nothing played yet: just start there
   const p = L.pending;
   L.pending = p && p.song == null && p.sec === sec ? null : { sec, mode: cfg().mode, at: announceAt(false) };
   renderLive();
@@ -1089,6 +1101,7 @@ function renderSongs() {
     const ppb = UI.ppb = clamp(Math.floor(avail / Math.max(totalBars + 4, 24)), 24, 56);
     // Empty bars after the last section, so its edge is never at the very border of the screen while dragging.
     const SPARE = 8;
+    const cur = cursorAt(full);
     const ruler = Array.from({ length: Math.ceil((totalBars + SPARE) / 4) }, (_, k) => `<span style="left:${k * 4 * ppb}px">${k * 4 + 1}</span>`).join("");
     const cueName = key => (CUE_KEYS.find(c => c.key === key) || { name: key }).name;
     const blocks = full.sections.map((s, i) => `<div class="ablk ${i === UI.selSec ? "sel" : ""}" data-act="sel-sec" data-i="${i}" style="width:${s.bars * ppb}px;--c:${kindOf(s.kind).c}" role="button" aria-label="${esc(secLabel(full, i))}, ${s.bars} compases">
@@ -1157,11 +1170,12 @@ function renderSongs() {
       </div>
       <div class="row"><h3 class="grow" id="arr-total">Estructura · ${totalBars} compases · ${fmtDur(songSeconds(full))}</h3>
         <span id="pv-pos" class="mono muted" style="font-size:13px"></span>
-        <button class="btn ${L.playing ? "" : "primary"}" data-act="preview">${L.playing ? "■ Parar" : "▶ Escuchar desde " + esc(UI.selSec != null && secs[UI.selSec] ? secLabel(full, UI.selSec) : "el principio")}</button>
+        ${L.playing ? `<button class="btn" data-act="preview">■ Parar</button>` : `<button class="btn primary" data-act="preview" data-from="cursor" id="pv-cursor">▶ Desde el cursor · ${esc(secs.length ? secLabel(full, cur.sec) + " · compás " + (cur.bar + 1) : "")}</button>
+        <button class="btn" data-act="preview">▶ Desde ${esc(UI.selSec != null && secs[UI.selSec] ? secLabel(full, UI.selSec) : "el principio")}</button>`}
         <button class="btn small" data-act="play-song">Abrir en directo</button></div>
-      <div class="arr-wrap">${secs.length ? `<div class="arr" style="--ppb:${ppb}px"><div class="ruler">${ruler}</div><div class="arr-row">${blocks}</div></div>`
+      <div class="arr-wrap">${secs.length ? `<div class="arr" style="--ppb:${ppb}px"><div class="ruler" aria-label="Cursor: toca o arrastra para elegir el compás">${ruler}</div><div class="arr-row">${blocks}</div><div class="pcur" style="left:${cur.abs * ppb}px"><b>${cur.abs + 1}</b></div></div>`
         : `<div class="arr-empty">Añade la primera sección con los botones de abajo.</div>`}</div>
-      <p class="muted" style="margin:0;font-size:13px">Arrastra el borde derecho de un bloque (‖) para darle más o menos compases. Cada rayita es un compás y las líneas gruesas marcan grupos de 4. Normalmente las intros y finales tienen 4 u 8 compases, y las estrofas y coros 8 o 16.</p>
+      <p class="muted" style="margin:0;font-size:13px">Toca o arrastra la regla de los números para mover el cursor amarillo y escuchar desde ese compás. Arrastra el borde derecho de un bloque (‖) para darle más o menos compases. Cada rayita es un compás y las líneas gruesas marcan grupos de 4. Normalmente las intros y finales tienen 4 u 8 compases, y las estrofas y coros 8 o 16.</p>
       <div class="stack" style="gap:8px"><span class="label">Añadir sección al final</span><div class="add-chips">${chips}</div></div>
       ${insp}
       <div class="row" style="justify-content:flex-end"><button class="btn danger" data-act="del-song">Borrar canción</button></div>
@@ -1270,7 +1284,26 @@ function renderSettings() {
 /* ---------- Events ---------- */
 /* Drag the right edge of a section block to change its bars: the block grows live, snapping to whole bars,
    and the song is saved once the finger lifts. */
-let drag = null, dragEnded = false;
+let drag = null, dragEnded = false, cdrag = null;
+function cursorTo(x) {
+  const song = songById(UI.songId); if (!song || !cdrag) return;
+  const total = (song.sections || []).reduce((a, s) => a + (s.bars || 1), 0);
+  const bar = clamp(Math.floor((x - cdrag.arr.getBoundingClientRect().left) / UI.ppb), 0, Math.max(0, total - 1));
+  UI.cursor = { song: song.id, bar };
+  const pc = cdrag.arr.querySelector(".pcur"); pc.style.left = bar * UI.ppb + "px"; pc.querySelector("b").textContent = bar + 1;
+  const full = { ...song, sections: song.sections.map(x => ({ ...x, bars: x.bars || 1 })) }, c = cursorAt(full), btn = $("#pv-cursor");
+  if (btn) btn.textContent = `▶ Desde el cursor · ${secLabel(full, c.sec)} · compás ${c.bar + 1}`;
+}
+document.addEventListener("pointerdown", e => {
+  const r = e.target.closest(".ruler"); if (!r) return;
+  e.preventDefault(); cdrag = { arr: r.closest(".arr") };
+  try { r.setPointerCapture(e.pointerId); } catch {}
+  cursorTo(e.clientX);
+});
+document.addEventListener("pointermove", e => { if (cdrag) cursorTo(e.clientX); });
+const endCursor = () => { cdrag = null; };
+document.addEventListener("pointerup", endCursor);
+document.addEventListener("pointercancel", endCursor);
 document.addEventListener("pointerdown", e => {
   const g = e.target.closest("[data-grip]"); if (!g) return;
   const song = songById(UI.songId); const i = +g.dataset.grip; if (!song || !song.sections[i]) return;
@@ -1347,7 +1380,7 @@ document.addEventListener("click", async e => {
     case "edit-live-song": UI.songId = L.list[L.idx]; switchTab("songs"); break;
     case "pick-song": UI.songId = el.dataset.id; UI.selSec = 0; renderSongs(); break;
     case "sel-sec": if (dragEnded) break; UI.selSec = i; if (preview && L.playing) jumpTo(i); renderSongs(); break;
-    case "preview": togglePreview(); break;
+    case "preview": togglePreview(el.dataset.from === "cursor"); break;
     case "go-settings": switchTab("settings"); break;
     case "bars": editSong(s => { const x = s.sections[i]; x.bars = clamp((x.bars || 1) + +el.dataset.d, 1, 128); }); break;
     case "set-bars": editSong(s => { s.sections[i].bars = +el.dataset.n; }); break;
