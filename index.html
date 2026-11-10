@@ -267,7 +267,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "10";
+const APP_VERSION = "11";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -349,7 +349,7 @@ function songSeconds(song) {
 }
 
 /* ---------- Config (synced) and device options (this device only) ---------- */
-const DEFAULT_CFG = { accent: true, clickVol: 0.9, cueVol: 1, countIn: 1, voiceCount: true, autoNext: false, mode: "bar" };
+const DEFAULT_CFG = { accent: true, clickVol: 0.9, cueVol: 1, countIn: 1, preClick: true, voiceCount: true, autoNext: false, mode: "bar" };
 const cfg = () => ({ ...DEFAULT_CFG, ...(Store.config || {}) });
 function setCfg(patch) { Store.saveConfig({ ...cfg(), ...patch }); }
 const dev = (k, d) => { try { const v = localStorage.getItem("loopdirector-" + k); return v == null ? d : v === "1"; } catch { return d; } };
@@ -693,9 +693,11 @@ function refreshLive() {
 /* What the next bar will be, without changing anything. */
 function peekNext() {
   const secs = L.song.sections, cur = secs[L.sec], p = L.pending;
+  const to = q => (q.song != null && q.song !== L.idx ? { song: q.song, sec: q.sec } : { sec: q.sec });
+  // Free click before the song: bars of click alone until a section is tapped; then it goes in like any jump.
+  if (L.pre) return p && (p.mode !== "bar" || L.barNo + 1 >= (p.at || 0)) ? { ...to(p), bar: 0, start: true, viaPending: true } : { count: true };
   if (L.countLeft > 1) return { count: true };
   if (L.countLeft === 1) return { sec: L.sec, bar: 0, start: true };
-  const to = q => (q.song != null && q.song !== L.idx ? { song: q.song, sec: q.sec } : { sec: q.sec });
   // "Con aviso": the bar after the tap announces the section (cue + "two, three, four"); the section starts the bar after.
   if (p && p.mode === "bar" && L.barNo + 1 >= (p.at || 0)) return { ...to(p), bar: 0, start: true, viaPending: true };
   // "Siguiente compás": straight in on the next downbeat; the cue sounds on the next beat after the tap.
@@ -714,6 +716,11 @@ function cueFor(n) {
   return song && song.sections[n.sec] ? { cue: cueKeyFor(song, n.sec), key: (n.song ?? L.idx) + ":" + n.sec } : null;
 }
 function advance() {
+  if (L.pre) {
+    const n = peekNext(); L.barNo++; L.bar = 0;
+    if (n.count) return true;
+    L.pre = false; L.pending = null; L.sec = n.sec; return true;
+  }
   if (L.countLeft > 0) { L.countLeft--; L.bar = 0; L.barNo++; return true; }
   const n = peekNext(); // decided with the bar number of the bar that is ending, like every peek during it
   L.barNo++;
@@ -729,11 +736,13 @@ function advance() {
 }
 /* Ritardando: over the last bars of a section the tempo slides, beat by beat, from the section tempo to the target.
    It is skipped while the section loops or a jump is waiting, because then the section does not really end. */
+/* How far the tempo drops, as a % of the section tempo. Older songs stored a final BPM; it is read as a % of 120 only if no tempo is known. */
+function ritPct(r, bpm) { return r.pct ? clamp(r.pct, 30, 95) : r.to && bpm ? clamp(Math.round(r.to / bpm * 100 / 5) * 5, 30, 95) : 70; }
 function ritBpm(bpm, beats) {
   const s = L.song.sections[L.sec], r = s && s.rit;
-  if (!r || !r.bars || L.countLeft || L.loop || L.pending) return bpm;
+  if (!r || !r.bars || L.pre || L.countLeft || L.loop || L.pending) return bpm;
   const from = s.bars - r.bars; if (L.bar < from) return bpm;
-  const to = clamp(num(r.to, Math.round(bpm * 0.7)), 20, 300);
+  const to = clamp(Math.round(bpm * ritPct(r, bpm) / 100), 20, 300);
   const prog = ((L.bar - from) * beats + L.beat + 1) / (r.bars * beats);
   return bpm + (to - bpm) * clamp(prog, 0, 1);
 }
@@ -752,13 +761,13 @@ function schedule() {
     const cue = cueFor(peekNext());
     // A cue placed at this bar of the section ("End", "Last Time"…) speaks on beat 1. If a section cue falls on the
     // same beat, the placed cue wins and the count that follows still tells when the change comes.
-    const mark = L.beat === 0 && !L.countLeft && (L.song.sections[L.sec].cues || []).find(m => m.bar === L.bar + 1);
+    const mark = L.beat === 0 && !L.pre && !L.countLeft && (L.song.sections[L.sec].cues || []).find(m => m.bar === L.bar + 1);
     if (mark) { playCue(mark.key, t); if (cue) { L.cued = cue.key; L.cueBeat = 0; } }
     else if (cue && cue.key !== L.cued) { playCue(cue.cue, t); L.cued = cue.key; L.cueBeat = L.beat; }
     // Spoken count: after a section cue the rest of the bar is counted ("Chorus, two, three, four"),
     // and a count-in bar without a cue is counted in full ("one, two, three, four").
-    else if (c.voiceCount && L.beat < 4 && (L.cued ? L.beat > L.cueBeat : L.countLeft > 0)) playCue("count" + (L.beat + 1), t);
-    L.queue.push({ t, dur: 60 / bpm, song: L.song, idx: L.idx, sec: L.sec, bar: L.bar, beat: L.beat, beats: p.beats, bpm: Math.round(bpm), count: L.countLeft });
+    else if (c.voiceCount && L.beat < 4 && (L.cued ? L.beat > L.cueBeat : L.countLeft > 0 && !L.pre)) playCue("count" + (L.beat + 1), t);
+    L.queue.push({ t, dur: 60 / bpm, song: L.song, idx: L.idx, sec: L.sec, bar: L.bar, beat: L.beat, beats: p.beats, bpm: Math.round(bpm), count: L.countLeft, pre: L.pre });
     L.nextTime += 60 / bpm;
     if (++L.beat >= p.beats) { L.beat = 0; L.barDone = true; }
   }
@@ -771,9 +780,11 @@ async function start() {
   if (L.playing) return;
   if (!L.song || !L.song.sections.length) { toast("Esta canción no tiene secciones. Añádelas en Canciones."); return; }
   L.playing = true; L.ending = false; L.bar = 0; L.beat = 0; L.barDone = false; L.cued = null; L.cueBeat = 0; L.barNo = 0; L.queue = []; L.ev = null;
-  L.countLeft = cfg().countIn;
+  // From the live screen the click can run alone ("free click") until a section is tapped; the editor preview starts at once.
+  L.pre = !preview && cfg().preClick !== false; L.pending = null;
+  L.countLeft = L.pre ? 0 : cfg().countIn;
   L.nextTime = ctx.currentTime + (dev("safestart", false) ? 0.3 : 0.015);
-  if (L.countLeft === 0) { playCue(cueKeyFor(L.song, L.sec), L.nextTime); L.cued = "start"; }
+  if (L.countLeft === 0 && !L.pre) { playCue(cueKeyFor(L.song, L.sec), L.nextTime); L.cued = "start"; }
   schedule();
   L.timer = setInterval(schedule, 25);
   try { navigator.wakeLock?.request("screen").then(w => { L.wake = w; }, () => {}); } catch {}
@@ -781,7 +792,7 @@ async function start() {
 }
 function stop(finished) {
   L.playing = false; L.ending = false; clearInterval(L.timer); L.timer = null; L.queue = []; L.ev = null;
-  L.pending = null; L.countLeft = 0; L.bar = 0; L.beat = 0;
+  L.pending = null; L.countLeft = 0; L.pre = false; L.bar = 0; L.beat = 0;
   try { L.wake?.release(); } catch {} L.wake = null;
   if (preview) {
     // Listening from the song editor: put back the song and setlist the live screen had.
@@ -823,7 +834,7 @@ function paintEditor() {
 function jumpTo(sec) {
   if (!L.song || !L.song.sections[sec]) return;
   if (!L.playing) { L.sec = sec; L.bar = 0; renderLive(); return; }
-  if (L.countLeft > 0 && !L.pending) { L.sec = sec; L.cued = null; renderLive(); return; } // nothing played yet: just start there
+  if (L.countLeft > 0 && !L.pending && !L.pre) { L.sec = sec; L.cued = null; renderLive(); return; } // nothing played yet: just start there
   const p = L.pending;
   L.pending = p && p.song == null && p.sec === sec ? null : { sec, mode: cfg().mode, at: announceAt(false) };
   renderLive();
@@ -831,6 +842,7 @@ function jumpTo(sec) {
 function jumpSong(idx) {
   if (idx < 0 || idx >= L.list.length) return;
   if (!L.playing) { selectSong(idx); renderLive(); return; }
+  if (L.pre) { const b = L.beat; selectSong(idx); L.beat = b; L.pending = null; renderLive(); return; } // still on the free click: just change song
   if (idx === L.idx) { L.pending = null; renderLive(); return; }
   const p = L.pending;
   L.pending = p && p.song === idx ? null : { song: idx, sec: 0, mode: cfg().mode, at: announceAt(true) };
@@ -945,16 +957,16 @@ let lastPaint = "";
 function paintLive(force) {
   if (UI.tab !== "live" || !$("#timeline")) return;
   const playing = L.playing && L.ev;
-  const e = playing ? L.ev : { song: L.song, idx: L.idx, sec: L.sec, bar: 0, beat: -1, beats: secParams(L.song, L.sec).beats, bpm: secParams(L.song, L.sec).bpm, count: 0 };
+  const e = playing ? L.ev : { song: L.song, idx: L.idx, sec: L.sec, bar: 0, beat: -1, pre: L.playing && L.pre, beats: secParams(L.song, L.sec).beats, bpm: secParams(L.song, L.sec).bpm, count: 0 };
   const song = e.song; if (!song) return;
-  const key = [e.idx, e.sec, e.bar, e.beat, e.count, L.loop, JSON.stringify(L.pending), L.playing].join("|");
+  const key = [e.idx, e.sec, e.bar, e.beat, e.count, e.pre, L.loop, JSON.stringify(L.pending), L.playing].join("|");
   if (key !== lastPaint || force) {
     lastPaint = key;
     const s = song.sections[e.sec], kd = kindOf(s.kind);
-    $("#r-sec").textContent = secLabel(song, e.sec);
+    $("#r-sec").textContent = e.pre ? "Clic libre" : secLabel(song, e.sec);
     $("#r-sec-wrap").style.setProperty("--c", kd.c);
-    $("#r-bar-l").textContent = e.count ? "Cuenta" : "Compás";
-    $("#r-bar").innerHTML = e.count ? (e.beat + 1) : `${playing ? e.bar + 1 : "–"}<small>/ ${s.bars}</small>`;
+    $("#r-bar-l").textContent = e.pre ? "Clic" : e.count ? "Cuenta" : "Compás";
+    $("#r-bar").innerHTML = e.pre || e.count ? (e.beat + 1) : `${playing ? e.bar + 1 : "–"}<small>/ ${s.bars}</small>`;
     $("#r-bpm").innerHTML = `${e.bpm}<small>${e.beats}/${song.unit || 4}</small>`;
     const dots = $("#dots");
     if (dots.children.length !== e.beats) dots.innerHTML = Array.from({ length: e.beats }, (_, i) => `<i class="${i === 0 ? "first" : ""}"></i>`).join("");
@@ -965,13 +977,13 @@ function paintLive(force) {
     if (L.pending && L.pending.song == null) next = L.pending.sec;
     else if (!L.pending && L.loop) next = e.sec;
     document.querySelectorAll("#timeline .blk").forEach((b, i) => {
-      b.classList.toggle("cur", i === e.sec);
-      b.classList.toggle("done", playing && i < e.sec && !e.count);
+      b.classList.toggle("cur", i === e.sec && !e.pre);
+      b.classList.toggle("done", playing && i < e.sec && !e.count && !e.pre);
       b.classList.toggle("next", next === i && next !== e.sec);
       b.classList.toggle("loop", L.loop && i === e.sec);
     });
     document.querySelectorAll("#pads .pad").forEach((b, i) => {
-      b.classList.toggle("cur", i === e.sec);
+      b.classList.toggle("cur", i === e.sec && !e.pre);
       b.classList.toggle("pending", !!(L.pending && L.pending.song == null && L.pending.sec === i));
     });
     document.querySelectorAll(".sp-row").forEach(r => r.classList.toggle("queued", !!(L.pending && L.pending.song === +r.dataset.i)));
@@ -981,10 +993,12 @@ function paintLive(force) {
       const ns = songById(L.list[L.pending.song]);
       st.innerHTML = `<span class="tag">Siguiente</span> <b>${esc(ns ? ns.title : "")}</b> ${mode} · toca otra vez para cancelar`;
     } else if (L.pending) st.innerHTML = `<span class="tag">Salto</span> a <b>${esc(secLabel(song, L.pending.sec))}</b> ${mode} · toca otra vez para cancelar`;
+    else if (e.pre) st.innerHTML = `<span class="tag">Clic libre</span> toca una sección (por ejemplo <b>${esc(secLabel(song, 0))}</b>) para entrar con su aviso`;
     else if (e.count) st.innerHTML = `Cuenta de entrada… empieza en <b>${esc(secLabel(song, e.sec))}</b>`;
     else if (L.loop) st.innerHTML = `<span class="tag">Loop</span> repitiendo <b>${esc(secLabel(song, e.sec))}</b> hasta quitarlo`;
     else if (!L.playing && !CUE_KEYS.some(k => cueSource(k.key)))
       st.innerHTML = `<span class="tag">Sin avisos de voz</span> Impórtalos una vez en <button class="btn small" data-act="go-settings">Ajustes → Importar avisos</button>`;
+    else if (!L.playing && cfg().preClick !== false) st.innerHTML = `«Tocar» pone el clic solo; cuando quieras, toca <b>${esc(secLabel(song, 0))}</b> u otra sección para entrar.`;
     else if (!L.playing) st.innerHTML = `Empieza en <b>${esc(secLabel(song, e.sec))}</b>${cfg().countIn ? ` tras ${cfg().countIn} ${cfg().countIn > 1 ? "compases" : "compás"} de cuenta` : ""}. Toca una sección para elegir otra.`;
     else {
       const left = s.bars - e.bar - 1, nx = e.sec + 1 < song.sections.length ? secLabel(song, e.sec + 1) : null;
@@ -996,7 +1010,7 @@ function paintLive(force) {
   // Smooth playhead inside the current block.
   const blk = document.querySelectorAll("#timeline .blk")[e.sec]; if (!blk) return;
   let frac = 0;
-  if (playing && !e.count) {
+  if (playing && !e.count && !e.pre) {
     const within = clamp((ctx.currentTime - e.t) / e.dur, 0, 1);
     frac = (e.bar + (e.beat + within) / e.beats) / song.sections[e.sec].bars;
   }
@@ -1122,9 +1136,13 @@ function renderSongs() {
           <div class="row"><button class="btn small" data-act="mk-add">+ Añadir aviso (End, Last Time…)</button>
             <span class="muted" style="font-size:13px">Toca un compás de la barra para moverlo. Suena en el 1 de ese compás, sin crear otra sección.</span></div>
         </div>
-        <div class="row quick"><span class="muted" style="margin-right:4px">Ralentizar al final</span>
-          ${[[0, "No"], [1, "1"], [2, "2"], [4, "4"]].map(([n, t]) => `<button class="btn small" data-act="set-rit" data-n="${n}" aria-pressed="${(s.rit?.bars || 0) === n}">${t}</button>`).join("")}
-          ${s.rit?.bars ? `<span class="muted">${s.rit.bars > 1 ? "compases" : "compás"}, hasta</span><input type="number" inputmode="numeric" min="20" max="300" data-f="ritTo" value="${num(s.rit.to, Math.round(p.bpm * 0.7))}" style="width:80px" aria-label="Tempo final"><span class="muted">BPM</span>` : ""}
+        <div class="row"><span class="muted" style="margin-right:4px">Ralentizar al final</span>
+          <button class="icon-btn" data-act="rit-bars" data-d="-1" aria-label="Un compás menos de ritardando">−</button>
+          <b class="mono" style="min-width:34px;text-align:center">${s.rit?.bars || "No"}</b>
+          <button class="icon-btn" data-act="rit-bars" data-d="1" aria-label="Un compás más de ritardando">+</button>
+          ${s.rit?.bars ? `<span class="muted">${s.rit.bars > 1 ? "compases" : "compás"}, hasta el</span>
+          <select data-f="ritPct" style="width:auto" aria-label="Tempo final en porcentaje">${Array.from({ length: 14 }, (_, k) => 95 - k * 5).map(n => `<option value="${n}" ${n === ritPct(s.rit, p.bpm) ? "selected" : ""}>${n} %</option>`).join("")}</select>
+          <span class="muted">del tempo · de ${p.bpm} a <b style="color:var(--ink)">${Math.round(p.bpm * ritPct(s.rit, p.bpm) / 100)} BPM</b></span>` : ""}
         </div>
         <div class="row"><button class="btn small" data-act="sec-up" ${i === 0 ? "disabled" : ""}>‹ Mover antes</button><button class="btn small" data-act="sec-down" ${i === secs.length - 1 ? "disabled" : ""}>Mover después ›</button>
           <span class="grow"></span><button class="btn small" data-act="sec-dup">Duplicar</button><button class="btn small danger" data-act="sec-del">Quitar</button></div>
@@ -1227,6 +1245,7 @@ function renderSettings() {
       <h3>Al tocar</h3>
       <div class="field"><span class="label">Cuenta de entrada</span>
         <div class="seg" role="group">${[0, 1, 2].map(n => `<button data-act="countin" data-v="${n}" aria-pressed="${c.countIn === n}">${n ? n + (n > 1 ? " compases" : " compás") : "Sin cuenta"}</button>`).join("")}</div></div>
+      <label class="toggle"><span>Clic libre al tocar: el clic suena solo, los compases que quieras, hasta que toques una sección (por ejemplo Intro). Entonces entra con su aviso como cualquier salto.</span><input type="checkbox" data-cfg="preClick" ${c.preClick !== false ? "checked" : ""}></label>
       <label class="toggle"><span>Contar después de cada aviso («Chorus, two, three, four») y en la cuenta de entrada</span><input type="checkbox" data-cfg="voiceCount" ${c.voiceCount ? "checked" : ""}></label>
       <label class="toggle"><span>Al acabar una canción, seguir con la siguiente del setlist</span><input type="checkbox" data-cfg="autoNext" ${c.autoNext ? "checked" : ""}></label>
       <p class="muted" style="margin:0;font-size:13px">Si está apagado, el clic se para al final y la siguiente canción queda lista. Durante la canción también puedes tocar otra en el setlist para pasar a ella.</p>
@@ -1337,7 +1356,7 @@ document.addEventListener("click", async e => {
     case "mk-del": { const j = +el.closest("[data-j]").dataset.j; editSong(s => { s.sections[i].cues.splice(j, 1); if (!s.sections[i].cues.length) delete s.sections[i].cues; }); break; }
     case "mk-set": { const j = +el.closest("[data-j]").dataset.j; editSong(s => { s.sections[i].cues[j].bar = +el.dataset.n; }); break; }
     case "mk-bar": { const j = +el.closest("[data-j]").dataset.j; editSong(s => { const x = s.sections[i], m = x.cues[j]; m.bar = clamp(Math.min(m.bar, x.bars || 1) + +el.dataset.d, 1, x.bars || 1); }); break; }
-    case "set-rit": editSong(s => { const x = s.sections[i], n = +el.dataset.n; if (n) x.rit = { ...(x.rit || {}), bars: n }; else delete x.rit; }); break;
+    case "rit-bars": editSong(s => { const x = s.sections[i], n = clamp((x.rit?.bars || 0) + +el.dataset.d, 0, x.bars || 1); if (n) x.rit = { ...(x.rit || {}), bars: n }; else delete x.rit; }); break;
     case "set-num": editSong(s => { if (el.dataset.n === "auto") delete s.sections[i].n; else s.sections[i].n = +el.dataset.n; }); break;
     case "sec-up": UI.selSec = i - 1; editSong(s => { const x = s.sections.splice(i, 1)[0]; s.sections.splice(i - 1, 0, x); }); break;
     case "sec-down": UI.selSec = i + 1; editSong(s => { const x = s.sections.splice(i, 1)[0]; s.sections.splice(i + 1, 0, x); }); break;
@@ -1381,7 +1400,7 @@ document.addEventListener("change", async e => {
       else if (f === "bars") x.bars = clamp(Math.round(num(t.value, 1)), 1, 256);
       else if (f === "bpm") { const n = num(t.value, 0); if (n) x.bpm = clamp(Math.round(n), 20, 300); else delete x.bpm; }
       else if (f === "beats") { if (t.value) x.beats = +t.value; else delete x.beats; }
-      else if (f === "ritTo" && x.rit) { const n = num(t.value, 0); if (n) x.rit.to = clamp(Math.round(n), 20, 300); else delete x.rit.to; }
+      else if (f === "ritPct" && x.rit) { x.rit.pct = clamp(+t.value || 70, 30, 95); delete x.rit.to; }
     });
     return;
   }
