@@ -186,6 +186,11 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 .ablk.cur { background: color-mix(in srgb, var(--c) 55%, var(--surface)); }
 .grip { position: absolute; right: 0; top: 0; bottom: 0; width: 28px; touch-action: none; cursor: ew-resize; display: grid; place-items: center; background: color-mix(in srgb, var(--c) 50%, transparent); }
 .grip::after { content: ""; width: 10px; height: 36px; border-left: 3px solid var(--ink); border-right: 3px solid var(--ink); border-radius: 2px; opacity: .8; }
+.arr-spare { flex: none; height: 100%; border-radius: 10px; border: 2px dashed var(--line); margin-left: 4px; opacity: .6; }
+.ablk .mk { position: absolute; top: 30px; z-index: 1; margin-left: 2px; padding: 1px 6px; border-radius: 6px; background: var(--led); color: var(--led-ink); font-size: 11px; font-weight: 800; white-space: nowrap; pointer-events: none; }
+.ablk .mk::before { content: ""; position: absolute; left: -2px; top: 0; height: 60px; border-left: 2px solid var(--led); }
+.ablk .ritz { position: absolute; top: 0; bottom: 0; right: 0; pointer-events: none; background: linear-gradient(to right, transparent, rgba(0, 0, 0, .35)); }
+.ablk .ritz b { position: absolute; right: 32px; top: 6px; font-size: 12px; font-style: italic; color: var(--ink); }
 .arr-empty { height: 104px; display: grid; place-items: center; border: 2px dashed var(--line); border-radius: 12px; color: var(--muted); }
 .insp { border-left: 6px solid var(--c); }
 .insp .big { font-family: var(--display); font-size: 40px; font-weight: 800; line-height: 1; min-width: 56px; text-align: center; font-variant-numeric: tabular-nums; }
@@ -250,7 +255,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "8";
+const APP_VERSION = "9";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -290,17 +295,25 @@ const CUE_KEYS = [
   ...KINDS.filter(k => k.k !== "custom").map(k => ({ key: k.k, name: k.name, c: k.c })),
   { key: "verse2", name: "Verse 2", c: "#3BB273" }, { key: "chorus2", name: "Chorus 2", c: "#E4572E" },
   ...[1, 2, 3, 4].map(n => ({ key: "count" + n, name: ["One", "Two", "Three", "Four"][n - 1] + " (cuenta)", c: "#97A0B2" })),
+  // Band directions, for cues placed inside a section (they are not sections).
+  ...[["lasttime", "Last Time"], ["repeat", "Repeat"], ["builditup", "Build It Up"], ["bringitdown", "Bring It Down"], ["allin", "All In"],
+    ["acappella", "A Cappella"], ["break", "Break"], ["halftime", "Half Time"], ["doubletime", "Double Time"], ["kickitin", "Kick It In"],
+    ["swell", "Swell"], ["worshipleader", "Worship Leader"], ["drums", "Drums"], ["bass", "Bass"], ["guitar", "Guitar"], ["keys", "Keys"],
+    ["band", "Band"], ["fullband", "Full Band"], ["acoustic", "Acoustic"]].map(([key, name]) => ({ key, name, c: "#F5A623", extra: true })),
 ];
+/* Cues that can be placed at a bar inside a section ("End" two bars before the end of the last chorus…). */
+const MARK_KEYS = CUE_KEYS.filter(k => !k.key.startsWith("count"));
 /* Position of a section among those of the same kind (1-based), for "Verse 2" and its cue. */
 function occurrence(song, i) {
   const s = song.sections[i];
   return song.sections.slice(0, i + 1).filter(x => x.kind === s.kind).length;
 }
-/* The number shown after the name: the one chosen in the editor (0 = none), or else automatic when the kind repeats. */
+/* The number shown after the name: the one chosen in the editor (0 = none). If none was chosen,
+   verses count themselves (Verse 1, Verse 2…) and every other kind goes without a number. */
 function secNum(song, i) {
   const s = song.sections[i];
   if (s.n != null) return s.n;
-  return song.sections.filter(x => x.kind === s.kind).length > 1 ? occurrence(song, i) : 0;
+  return s.kind === "verse" ? occurrence(song, i) : 0;
 }
 function secLabel(song, i, short) {
   const s = song.sections[i];
@@ -702,6 +715,16 @@ function advance() {
   L.sec = n.sec; L.bar = n.bar;
   return true;
 }
+/* Ritardando: over the last bars of a section the tempo slides, beat by beat, from the section tempo to the target.
+   It is skipped while the section loops or a jump is waiting, because then the section does not really end. */
+function ritBpm(bpm, beats) {
+  const s = L.song.sections[L.sec], r = s && s.rit;
+  if (!r || !r.bars || L.countLeft || L.loop || L.pending) return bpm;
+  const from = s.bars - r.bars; if (L.bar < from) return bpm;
+  const to = clamp(num(r.to, Math.round(bpm * 0.7)), 20, 300);
+  const prog = ((L.bar - from) * beats + L.beat + 1) / (r.bars * beats);
+  return bpm + (to - bpm) * clamp(prog, 0, 1);
+}
 function schedule() {
   const ahead = 0.12, c = cfg();
   while (L.playing && !L.ending && L.nextTime < ctx.currentTime + ahead) {
@@ -711,15 +734,20 @@ function schedule() {
       if (!advance()) { L.ending = true; L.queue.push({ t, stop: true }); clearInterval(L.timer); L.timer = null; return; }
     }
     const p = secParams(L.song, L.sec);
+    const bpm = ritBpm(p.bpm, p.beats);
     if (L.beat === 0) L.cued = null;
     playBuf(L.beat === 0 && c.accent ? clickBuf.up : clickBuf.rim, c.clickVol, t);
     const cue = cueFor(peekNext());
-    if (cue && cue.key !== L.cued) { playCue(cue.cue, t); L.cued = cue.key; L.cueBeat = L.beat; }
+    // A cue placed at this bar of the section ("End", "Last Time"…) speaks on beat 1. If a section cue falls on the
+    // same beat, the placed cue wins and the count that follows still tells when the change comes.
+    const mark = L.beat === 0 && !L.countLeft && (L.song.sections[L.sec].cues || []).find(m => m.bar === L.bar + 1);
+    if (mark) { playCue(mark.key, t); if (cue) { L.cued = cue.key; L.cueBeat = 0; } }
+    else if (cue && cue.key !== L.cued) { playCue(cue.cue, t); L.cued = cue.key; L.cueBeat = L.beat; }
     // Spoken count: after a section cue the rest of the bar is counted ("Chorus, two, three, four"),
     // and a count-in bar without a cue is counted in full ("one, two, three, four").
     else if (c.voiceCount && L.beat < 4 && (L.cued ? L.beat > L.cueBeat : L.countLeft > 0)) playCue("count" + (L.beat + 1), t);
-    L.queue.push({ t, dur: 60 / p.bpm, song: L.song, idx: L.idx, sec: L.sec, bar: L.bar, beat: L.beat, beats: p.beats, bpm: p.bpm, count: L.countLeft });
-    L.nextTime += 60 / p.bpm;
+    L.queue.push({ t, dur: 60 / bpm, song: L.song, idx: L.idx, sec: L.sec, bar: L.bar, beat: L.beat, beats: p.beats, bpm: Math.round(bpm), count: L.countLeft });
+    L.nextTime += 60 / bpm;
     if (++L.beat >= p.beats) { L.beat = 0; L.barDone = true; }
   }
 }
@@ -1030,10 +1058,15 @@ function renderSongs() {
     // Bar width: fit the song in the pane when possible, but never so thin that a bar cannot be told apart.
     const avail = window.innerWidth > 860 ? window.innerWidth - 400 : window.innerWidth - 70;
     const ppb = UI.ppb = clamp(Math.floor(avail / Math.max(totalBars + 4, 24)), 24, 56);
-    const ruler = Array.from({ length: Math.ceil((totalBars + 1) / 4) }, (_, k) => `<span style="left:${k * 4 * ppb}px">${k * 4 + 1}</span>`).join("");
+    // Empty bars after the last section, so its edge is never at the very border of the screen while dragging.
+    const SPARE = 8;
+    const ruler = Array.from({ length: Math.ceil((totalBars + SPARE) / 4) }, (_, k) => `<span style="left:${k * 4 * ppb}px">${k * 4 + 1}</span>`).join("");
+    const cueName = key => (CUE_KEYS.find(c => c.key === key) || { name: key }).name;
     const blocks = full.sections.map((s, i) => `<div class="ablk ${i === UI.selSec ? "sel" : ""}" data-act="sel-sec" data-i="${i}" style="width:${s.bars * ppb}px;--c:${kindOf(s.kind).c}" role="button" aria-label="${esc(secLabel(full, i))}, ${s.bars} compases">
-        <i class="ticks"></i><span class="nm">${esc(secLabel(full, i))}</span><span class="n">${s.bars}<small>${s.bars === 1 ? "compás" : "comp."}</small></span>
-        <em class="eph"></em><span class="grip" data-grip="${i}" aria-hidden="true"></span></div>`).join("");
+        <i class="ticks"></i>${s.rit && s.rit.bars ? `<i class="ritz" style="left:${Math.max(0, s.bars - s.rit.bars) * ppb}px"><b>rit.</b></i>` : ""}
+        <span class="nm">${esc(secLabel(full, i))}</span><span class="n">${s.bars}<small>${s.bars === 1 ? "compás" : "comp."}</small></span>
+        ${(s.cues || []).filter(m => m.bar <= s.bars).map(m => `<span class="mk" style="left:${(m.bar - 1) * ppb}px">${esc(cueName(m.key))}</span>`).join("")}
+        <em class="eph"></em><span class="grip" data-grip="${i}" aria-hidden="true"></span></div>`).join("") + `<div class="arr-spare" style="width:${SPARE * ppb}px"></div>`;
     const chips = KINDS.map(k => `<button data-act="add-sec" data-k="${k.k}" style="--c:${k.c}">+ ${esc(k.name)}</button>`).join("");
     let insp = "";
     if (UI.selSec != null) {
@@ -1056,6 +1089,21 @@ function renderSongs() {
           <div class="field grow"><span class="label">Nombre (opcional)</span><input type="text" data-f="label" value="${esc(s.label || "")}" placeholder="${esc(secLabel({ ...full, sections: full.sections.map((x, j) => j === i ? { ...x, label: "" } : x) }, i))}"></div>
           <div class="field" style="width:96px"><span class="label">BPM</span><input type="number" inputmode="numeric" min="20" max="300" data-f="bpm" value="${s.bpm || ""}" placeholder="${num(song.bpm, 120)}"></div>
           <div class="field" style="width:84px"><span class="label">Tiempos</span><select data-f="beats">${beatOpts(s.beats || "", true)}</select></div>
+        </div>
+        <div class="stack" style="gap:6px">
+          <span class="label">Avisos dentro de la sección</span>
+          ${(s.cues || []).map((m, j) => `<div class="row" data-j="${j}">
+            <select data-mk="${j}" style="width:auto;min-width:150px" aria-label="Aviso">${MARK_KEYS.map(k => `<option value="${k.key}" ${k.key === m.key ? "selected" : ""}>${esc(k.name)}${cueSource(k.key) ? "" : " (sin audio)"}</option>`).join("")}</select>
+            <span class="muted">en el compás</span>
+            <button class="icon-btn" data-act="mk-bar" data-d="-1" aria-label="Un compás antes">−</button><b class="mono" style="min-width:22px;text-align:center">${Math.min(m.bar, s.bars)}</b><button class="icon-btn" data-act="mk-bar" data-d="1" aria-label="Un compás después">+</button>
+            <span class="muted">${s.bars - Math.min(m.bar, s.bars) === 0 ? "(el último)" : `(quedan ${s.bars - Math.min(m.bar, s.bars) + 1})`}</span>
+            <button class="icon-btn" data-act="mk-del" aria-label="Quitar aviso">✕</button></div>`).join("")}
+          <div class="row"><button class="btn small" data-act="mk-add">+ Añadir aviso (End, Last Time…)</button>
+            <span class="muted" style="font-size:13px">Suena en el 1 del compás elegido, sin crear otra sección.</span></div>
+        </div>
+        <div class="row quick"><span class="muted" style="margin-right:4px">Ralentizar al final</span>
+          ${[[0, "No"], [1, "1"], [2, "2"], [4, "4"]].map(([n, t]) => `<button class="btn small" data-act="set-rit" data-n="${n}" aria-pressed="${(s.rit?.bars || 0) === n}">${t}</button>`).join("")}
+          ${s.rit?.bars ? `<span class="muted">compás${s.rit.bars > 1 ? "es" : ""}, hasta</span><input type="number" inputmode="numeric" min="20" max="300" data-f="ritTo" value="${num(s.rit.to, Math.round(p.bpm * 0.7))}" style="width:80px" aria-label="Tempo final"><span class="muted">BPM</span>` : ""}
         </div>
         <div class="row"><button class="btn small" data-act="sec-up" ${i === 0 ? "disabled" : ""}>‹ Mover antes</button><button class="btn small" data-act="sec-down" ${i === secs.length - 1 ? "disabled" : ""}>Mover después ›</button>
           <span class="grow"></span><button class="btn small" data-act="sec-dup">Duplicar</button><button class="btn small danger" data-act="sec-del">Quitar</button></div>
@@ -1188,24 +1236,36 @@ document.addEventListener("pointerdown", e => {
   const song = songById(UI.songId); const i = +g.dataset.grip; if (!song || !song.sections[i]) return;
   e.preventDefault();
   const blk = g.closest(".ablk");
-  drag = { i, x: e.clientX, start: song.sections[i].bars || 1, bars: song.sections[i].bars || 1, blk, ppb: UI.ppb, song };
+  const wrap = blk.closest(".arr-wrap");
+  drag = { i, x: e.clientX, cx: e.clientX, start: song.sections[i].bars || 1, bars: song.sections[i].bars || 1, blk, ppb: UI.ppb, song, wrap, scroll0: wrap.scrollLeft };
   try { g.setPointerCapture(e.pointerId); } catch {}
   document.querySelectorAll(".ablk.sel").forEach(b => b.classList.remove("sel"));
   blk.classList.add("dragging", "sel");
+  // Holding the finger near either edge scrolls the structure, so a section can keep growing past the screen.
+  drag.timer = setInterval(() => {
+    if (!drag) return;
+    const r = drag.wrap.getBoundingClientRect(), edge = 56;
+    // Slow near the edge zone, a bit faster right at the border (about 2 to 6 bars per second).
+    const depth = drag.cx > r.right - edge ? drag.cx - (r.right - edge) : drag.cx < r.left + edge ? drag.cx - (r.left + edge) : 0;
+    const v = Math.sign(depth) * Math.round(1 + 4 * Math.min(1, Math.abs(depth) / edge));
+    if (!v) return;
+    const before = drag.wrap.scrollLeft; drag.wrap.scrollLeft += v;
+    if (drag.wrap.scrollLeft !== before) dragTo();
+  }, 30);
 });
-document.addEventListener("pointermove", e => {
-  if (!drag) return;
-  const bars = clamp(drag.start + Math.round((e.clientX - drag.x) / drag.ppb), 1, 128);
+document.addEventListener("pointermove", e => { if (drag) { drag.cx = e.clientX; dragTo(); } });
+function dragTo() {
+  const bars = clamp(drag.start + Math.round((drag.cx - drag.x + drag.wrap.scrollLeft - drag.scroll0) / drag.ppb), 1, 128);
   if (bars === drag.bars) return;
   drag.bars = bars;
   drag.blk.style.width = bars * drag.ppb + "px";
   drag.blk.querySelector(".n").innerHTML = `${bars}<small>${bars === 1 ? "compás" : "comp."}</small>`;
   const secs = drag.song.sections.map((x, j) => ({ ...x, bars: j === drag.i ? bars : x.bars || 1 }));
   const total = $("#arr-total"); if (total) total.textContent = `Estructura · ${secs.reduce((a, x) => a + x.bars, 0)} compases · ${fmtDur(songSeconds({ ...drag.song, sections: secs }))}`;
-});
+}
 function endDrag() {
   if (!drag) return;
-  const d = drag; drag = null;
+  const d = drag; drag = null; clearInterval(d.timer);
   dragEnded = true; setTimeout(() => { dragEnded = false; }, 50); // the click that follows the drag must not reselect
   UI.selSec = d.i;
   if (d.bars !== d.start) editSong(s => { s.sections[d.i].bars = d.bars; }); else renderSongs();
@@ -1252,6 +1312,10 @@ document.addEventListener("click", async e => {
     case "bars": editSong(s => { const x = s.sections[i]; x.bars = clamp((x.bars || 1) + +el.dataset.d, 1, 128); }); break;
     case "set-bars": editSong(s => { s.sections[i].bars = +el.dataset.n; }); break;
     case "set-kind": editSong(s => { s.sections[i].kind = el.dataset.k; }); break;
+    case "mk-add": editSong(s => { const x = s.sections[i]; (x.cues = x.cues || []).push({ key: "ending", bar: Math.max(1, (x.bars || 1) - 1) }); }); break;
+    case "mk-del": { const j = +el.closest("[data-j]").dataset.j; editSong(s => { s.sections[i].cues.splice(j, 1); if (!s.sections[i].cues.length) delete s.sections[i].cues; }); break; }
+    case "mk-bar": { const j = +el.closest("[data-j]").dataset.j; editSong(s => { const x = s.sections[i], m = x.cues[j]; m.bar = clamp(Math.min(m.bar, x.bars || 1) + +el.dataset.d, 1, x.bars || 1); }); break; }
+    case "set-rit": editSong(s => { const x = s.sections[i], n = +el.dataset.n; if (n) x.rit = { ...(x.rit || {}), bars: n }; else delete x.rit; }); break;
     case "set-num": editSong(s => { if (el.dataset.n === "auto") delete s.sections[i].n; else s.sections[i].n = +el.dataset.n; }); break;
     case "sec-up": UI.selSec = i - 1; editSong(s => { const x = s.sections.splice(i, 1)[0]; s.sections.splice(i - 1, 0, x); }); break;
     case "sec-down": UI.selSec = i + 1; editSong(s => { const x = s.sections.splice(i, 1)[0]; s.sections.splice(i + 1, 0, x); }); break;
@@ -1295,7 +1359,13 @@ document.addEventListener("change", async e => {
       else if (f === "bars") x.bars = clamp(Math.round(num(t.value, 1)), 1, 256);
       else if (f === "bpm") { const n = num(t.value, 0); if (n) x.bpm = clamp(Math.round(n), 20, 300); else delete x.bpm; }
       else if (f === "beats") { if (t.value) x.beats = +t.value; else delete x.beats; }
+      else if (f === "ritTo" && x.rit) { const n = num(t.value, 0); if (n) x.rit.to = clamp(Math.round(n), 20, 300); else delete x.rit.to; }
     });
+    return;
+  }
+  if (t.dataset.mk != null) {
+    const i = +t.closest("[data-i]").dataset.i, j = +t.dataset.mk;
+    editSong(s => { const m = s.sections[i].cues && s.sections[i].cues[j]; if (m) m.key = t.value; });
     return;
   }
   if (t.id === "f-setname") { editSet(s => { s.name = t.value.trim() || "Setlist"; }); return; }
