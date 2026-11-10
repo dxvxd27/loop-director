@@ -75,7 +75,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 .live { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 272px; gap: 14px; padding-bottom: 12px; }
 .live-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
 .now { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: end; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 12px 16px; }
-.song-title { font-weight: 700; font-size: 24px; line-height: 1.15; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.song-title { font-family: var(--display); font-weight: 800; font-size: 40px; line-height: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .readouts { display: flex; gap: 22px; align-items: flex-end; }
 /* Time left of the tempo change between two songs: a bar that empties as the seconds pass. */
 .trbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
@@ -249,7 +249,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
   .split .pane:first-child { max-height: 260px; }
   .now { grid-template-columns: 1fr; }
   .readouts { gap: 14px; flex-wrap: wrap; }
-  .ro b { font-size: 32px; }
+  .ro b, .song-title { font-size: 32px; }
   .transport { flex-wrap: wrap; }
   .sec-head { display: none; }
   .secrow { grid-template-columns: 8px minmax(0, 1fr) minmax(0, 1fr); }
@@ -281,7 +281,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "19";
+const APP_VERSION = "20";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
