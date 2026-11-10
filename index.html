@@ -180,6 +180,9 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 .ablk .n small { font-family: var(--body); font-size: 12px; font-weight: 600; color: var(--muted); margin-left: 3px; }
 .ablk.sel { background: color-mix(in srgb, var(--c) 42%, var(--surface)); box-shadow: inset 0 0 0 3px var(--ink); }
 .ablk.dragging { box-shadow: inset 0 0 0 3px var(--led); }
+.ablk .eph { position: absolute; top: 0; bottom: 0; width: 3px; margin-left: -1px; background: var(--led); display: none; z-index: 2; pointer-events: none; }
+.ablk.cur .eph { display: block; }
+.ablk.cur { background: color-mix(in srgb, var(--c) 55%, var(--surface)); }
 .grip { position: absolute; right: 0; top: 0; bottom: 0; width: 28px; touch-action: none; cursor: ew-resize; display: grid; place-items: center; background: color-mix(in srgb, var(--c) 50%, transparent); }
 .grip::after { content: ""; width: 10px; height: 36px; border-left: 3px solid var(--ink); border-right: 3px solid var(--ink); border-radius: 2px; opacity: .8; }
 .arr-empty { height: 104px; display: grid; place-items: center; border: 2px dashed var(--line); border-radius: 12px; color: var(--muted); }
@@ -246,7 +249,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "3";
+const APP_VERSION = "4";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -726,11 +729,42 @@ function stop(finished) {
   L.playing = false; L.ending = false; clearInterval(L.timer); L.timer = null; L.queue = []; L.ev = null;
   L.pending = null; L.countLeft = 0; L.bar = 0; L.beat = 0;
   try { L.wake?.release(); } catch {} L.wake = null;
-  if (finished) {
+  if (preview) {
+    // Listening from the song editor: put back the song and setlist the live screen had.
+    const p = preview; preview = null;
+    L.setId = p.setId; buildList();
+    const i = L.list.indexOf(p.songId); selectSong(i >= 0 ? i : 0);
+    if (finished) toast("Fin de la canción.");
+  } else if (finished) {
     if (L.idx + 1 < L.list.length) { selectSong(L.idx + 1); toast("Canción terminada. Lista la siguiente."); }
     else { L.sec = 0; toast("Fin del setlist."); }
   }
   renderLive();
+  if (UI.tab === "songs") renderSongs();
+}
+/* "Escuchar" in the song editor: play the song being edited from the selected section, without touching the live setlist. */
+let preview = null;
+async function togglePreview() {
+  if (L.playing) { stop(false); return; }
+  const song = songById(UI.songId);
+  if (!song || !(song.sections || []).length) { toast("Añade al menos una sección para escuchar."); return; }
+  preview = { setId: L.setId, songId: L.list[L.idx] || null };
+  L.list = [song.id]; L.idx = 0; L.song = cloneSong(song);
+  L.sec = clamp(UI.selSec || 0, 0, L.song.sections.length - 1); L.pending = null; L.loop = false;
+  await start();
+  if (!L.playing) { stop(false); return; } // audio blocked or no sections: restore the live screen
+  renderSongs();
+}
+/* Moving playhead over the section blocks of the editor while listening. */
+function paintEditor() {
+  const e = L.ev; if (!e || e.song.id !== UI.songId) return;
+  const blks = document.querySelectorAll(".arr-row .ablk");
+  blks.forEach((b, i) => b.classList.toggle("cur", i === e.sec && !e.count));
+  const pos = $("#pv-pos");
+  if (pos) pos.textContent = e.count ? `Cuenta ${e.beat + 1}…` : `${secLabel(e.song, e.sec)} · compás ${e.bar + 1}/${e.song.sections[e.sec].bars}`;
+  const b = blks[e.sec]; if (!b || e.count) return;
+  const within = clamp((ctx.currentTime - e.t) / e.dur, 0, 1);
+  b.querySelector(".eph").style.left = clamp((e.bar + (e.beat + within) / e.beats) / e.song.sections[e.sec].bars, 0, 1) * 100 + "%";
 }
 function jumpTo(sec) {
   if (!L.song || !L.song.sections[sec]) return;
@@ -917,7 +951,7 @@ function frame() {
       if (songChanged && UI.tab === "live") renderLive();
     }
   }
-  if (L.playing) paintLive(false);
+  if (L.playing) { paintLive(false); if (UI.tab === "songs") paintEditor(); }
   requestAnimationFrame(frame);
 }
 
@@ -979,7 +1013,7 @@ function renderSongs() {
     const ruler = Array.from({ length: Math.ceil((totalBars + 1) / 4) }, (_, k) => `<span style="left:${k * 4 * ppb}px">${k * 4 + 1}</span>`).join("");
     const blocks = full.sections.map((s, i) => `<div class="ablk ${i === UI.selSec ? "sel" : ""}" data-act="sel-sec" data-i="${i}" style="width:${s.bars * ppb}px;--c:${kindOf(s.kind).c}" role="button" aria-label="${esc(secLabel(full, i))}, ${s.bars} compases">
         <i class="ticks"></i><span class="nm">${esc(secLabel(full, i))}</span><span class="n">${s.bars}<small>${s.bars === 1 ? "compás" : "comp."}</small></span>
-        <span class="grip" data-grip="${i}" aria-hidden="true"></span></div>`).join("");
+        <em class="eph"></em><span class="grip" data-grip="${i}" aria-hidden="true"></span></div>`).join("");
     const chips = KINDS.map(k => `<button data-act="add-sec" data-k="${k.k}" style="--c:${k.c}">+ ${esc(k.name)}</button>`).join("");
     let insp = "";
     if (UI.selSec != null) {
@@ -1012,6 +1046,8 @@ function renderSongs() {
         <div class="field"><span class="label">Figura</span><select data-sf="unit">${[2, 4, 8].map(u => `<option value="${u}" ${u === num(song.unit, 4) ? "selected" : ""}>${u}</option>`).join("")}</select></div>
       </div>
       <div class="row"><h3 class="grow" id="arr-total">Estructura · ${totalBars} compases · ${fmtDur(songSeconds(full))}</h3>
+        <span id="pv-pos" class="mono muted" style="font-size:13px"></span>
+        <button class="btn ${L.playing ? "" : "primary"}" data-act="preview">${L.playing ? "■ Parar" : "▶ Escuchar desde " + esc(UI.selSec != null && secs[UI.selSec] ? secLabel(full, UI.selSec) : "el principio")}</button>
         <button class="btn small" data-act="play-song">Abrir en directo</button></div>
       <div class="arr-wrap">${secs.length ? `<div class="arr" style="--ppb:${ppb}px"><div class="ruler">${ruler}</div><div class="arr-row">${blocks}</div></div>`
         : `<div class="arr-empty">Añade la primera sección con los botones de abajo.</div>`}</div>
@@ -1187,7 +1223,8 @@ document.addEventListener("click", async e => {
     case "import-pulso": importPulso(el); break;
     case "edit-live-song": UI.songId = L.list[L.idx]; switchTab("songs"); break;
     case "pick-song": UI.songId = el.dataset.id; UI.selSec = 0; renderSongs(); break;
-    case "sel-sec": if (dragEnded) break; UI.selSec = i; renderSongs(); break;
+    case "sel-sec": if (dragEnded) break; UI.selSec = i; if (preview && L.playing) jumpTo(i); renderSongs(); break;
+    case "preview": togglePreview(); break;
     case "bars": editSong(s => { const x = s.sections[i]; x.bars = clamp((x.bars || 1) + +el.dataset.d, 1, 128); }); break;
     case "set-bars": editSong(s => { s.sections[i].bars = +el.dataset.n; }); break;
     case "set-kind": editSong(s => { s.sections[i].kind = el.dataset.k; }); break;
@@ -1290,6 +1327,16 @@ document.addEventListener("keydown", e => {
 /* ---------- Boot ---------- */
 Store.onChange(what => {
   if (what === "songs" || what === "setlists") refreshLive();
+  // Edits made while listening in the editor are heard right away (the bar in progress keeps its place).
+  if (what === "songs" && preview && L.playing) {
+    const s = songById(L.list[0]);
+    if (!s || !(s.sections || []).length) stop(false);
+    else {
+      L.song = cloneSong(s);
+      if (L.sec >= L.song.sections.length) { L.sec = L.song.sections.length - 1; L.bar = 0; }
+      if (L.pending && L.pending.sec >= L.song.sections.length) L.pending = null;
+    }
+  }
   if (what === "cues" || what === "config") loadCues();
   if (UI.tab === "live" && L.playing && (what === "songs" || what === "setlists")) return; // never redraw under the player for edits made elsewhere
   safeRender();
