@@ -275,7 +275,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "13";
+const APP_VERSION = "14";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -713,7 +713,7 @@ function selectSong(idx) {
   if (!L.list.length) { L.idx = 0; L.song = null; return; }
   L.idx = clamp(idx, 0, L.list.length - 1);
   L.song = cloneSong(songById(L.list[L.idx]));
-  L.sec = 0; L.bar = 0; L.beat = 0; L.pending = null; L.loop = false;
+  L.sec = 0; L.bar = 0; L.beat = 0; L.pending = null; L.loop = false; L.armed = null;
   saveLive();
 }
 function chooseSet(setId, songId) {
@@ -819,7 +819,9 @@ async function start() {
   if (!L.song || !L.song.sections.length) { toast("Esta canción no tiene secciones. Añádelas en Canciones."); return; }
   L.playing = true; L.ending = false; L.bar = 0; L.beat = 0; L.barDone = false; L.cued = null; L.cueBeat = 0; L.barNo = 0; L.queue = []; L.ev = null;
   // From the live screen the click can run alone ("free click") until a section is tapped; the editor preview starts at once.
-  L.pre = !preview && cfg().preClick !== false; L.pending = null; L.ramp = null; L.auto = false;
+  const armed = !preview && L.armed != null && L.song.sections[L.armed] ? L.armed : null;
+  if (armed != null) L.sec = armed;
+  L.pre = !preview && armed == null && cfg().preClick !== false; L.pending = null; L.ramp = null; L.auto = false; L.armed = null;
   L.countLeft = L.pre ? 0 : cfg().countIn;
   L.nextTime = ctx.currentTime + (dev("safestart", false) ? 0.3 : 0.015);
   if (L.countLeft === 0 && !L.pre) { L.bar = L.startBar || 0; if (!L.bar) playCue(cueKeyFor(L.song, L.sec), L.nextTime); L.cued = "start"; }
@@ -880,7 +882,8 @@ function paintEditor() {
 }
 function jumpTo(sec) {
   if (!L.song || !L.song.sections[sec]) return;
-  if (!L.playing) { L.sec = sec; L.bar = 0; renderLive(); return; }
+  // Stopped: tapping a section selects it as the start (tap again to clear it; with none, «Tocar» starts on free click).
+  if (!L.playing) { if (!preview) L.armed = L.armed === sec ? null : sec; L.sec = sec; L.bar = 0; renderLive(); return; }
   if (L.countLeft > 0 && !L.pending && !L.pre) { L.sec = sec; L.startBar = 0; L.cued = null; renderLive(); return; } // nothing played yet: just start there
   const p = L.pending;
   L.pending = p && p.song == null && p.sec === sec ? null : { sec, mode: cfg().mode, at: announceAt(false) };
@@ -1007,9 +1010,10 @@ let lastPaint = "";
 function paintLive(force) {
   if (UI.tab !== "live" || !$("#timeline")) return;
   const playing = L.playing && L.ev;
-  const e = playing ? L.ev : { song: L.song, idx: L.idx, sec: L.sec, bar: 0, beat: -1, pre: L.playing && L.pre, beats: secParams(L.song, L.sec).beats, bpm: secParams(L.song, L.sec).bpm, count: 0 };
+  const idleFree = !L.playing && L.armed == null && cfg().preClick !== false;
+  const e = playing ? L.ev : { song: L.song, idx: L.idx, sec: L.sec, bar: 0, beat: -1, pre: L.playing ? L.pre : idleFree, beats: secParams(L.song, L.sec).beats, bpm: secParams(L.song, L.sec).bpm, count: 0 };
   const song = e.song; if (!song) return;
-  const key = [e.idx, e.sec, e.bar, e.beat, e.count, e.pre, L.auto, L.loop, JSON.stringify(L.pending), L.playing].join("|");
+  const key = [e.idx, e.sec, e.bar, e.beat, e.count, e.pre, L.auto, L.armed, L.loop, JSON.stringify(L.pending), L.playing].join("|");
   if (key !== lastPaint || force) {
     lastPaint = key;
     const s = song.sections[e.sec], kd = kindOf(s.kind);
@@ -1043,7 +1047,7 @@ function paintLive(force) {
       const ns = songById(L.list[L.pending.song]);
       st.innerHTML = `<span class="tag">Siguiente</span> <b>${esc(ns ? ns.title : "")}</b> ${mode} · toca otra vez para cancelar`;
     } else if (L.pending) st.innerHTML = `<span class="tag">Salto</span> a <b>${esc(secLabel(song, L.pending.sec))}</b> ${mode} · toca otra vez para cancelar`;
-    else if (e.pre) {
+    else if (e.pre && L.playing) {
       const r = L.ramp, left = r ? r.t0 + r.dur - ctx.currentTime : 0, to = secParams(song, 0).bpm;
       const tempo = r && left > 0 ? ` · tempo ${Math.round(r.from)} → ${to} en ${Math.ceil(left)} s` : "";
       st.innerHTML = `<span class="tag">Clic libre</span> <b>${esc(song.title || "Sin título")}</b>${tempo} · ` + (L.auto
@@ -1054,8 +1058,8 @@ function paintLive(force) {
     else if (L.loop) st.innerHTML = `<span class="tag">Loop</span> repitiendo <b>${esc(secLabel(song, e.sec))}</b> hasta quitarlo`;
     else if (!L.playing && !CUE_KEYS.some(k => cueSource(k.key)))
       st.innerHTML = `<span class="tag">Sin avisos de voz</span> Impórtalos una vez en <button class="btn small" data-act="go-settings">Ajustes → Importar avisos</button>`;
-    else if (!L.playing && cfg().preClick !== false) st.innerHTML = `«Tocar» pone el clic solo; cuando quieras, toca <b>${esc(secLabel(song, 0))}</b> u otra sección para entrar.`;
-    else if (!L.playing) st.innerHTML = `Empieza en <b>${esc(secLabel(song, e.sec))}</b>${cfg().countIn ? ` tras ${cfg().countIn} ${cfg().countIn > 1 ? "compases" : "compás"} de cuenta` : ""}. Toca una sección para elegir otra.`;
+    else if (idleFree) st.innerHTML = `«Tocar» empieza con clic libre y entras tocando una sección. O elige ahora una sección para empezar directamente en ella.`;
+    else if (!L.playing) st.innerHTML = `Empieza en <b>${esc(secLabel(song, e.sec))}</b>${cfg().countIn ? ` tras ${cfg().countIn} ${cfg().countIn > 1 ? "compases" : "compás"} de cuenta` : ""}.${L.armed != null ? " Toca otra sección para cambiarla, o la misma para quitarla." : " Toca una sección para elegir otra."}`;
     else {
       const left = s.bars - e.bar - 1, nx = e.sec + 1 < song.sections.length ? secLabel(song, e.sec + 1) : null;
       st.innerHTML = nx ? `Luego <b>${esc(nx)}</b>${left ? ` en ${left} ${left > 1 ? "compases" : "compás"}` : " en el siguiente compás"}` : `Última sección${left ? ` · quedan ${left} ${left > 1 ? "compases" : "compás"}` : ""}`;
@@ -1428,7 +1432,7 @@ document.addEventListener("click", async e => {
     case "loop": toggleLoop(); break;
     case "hold": L.auto = false; if (L.pending && L.pending.auto) L.pending = null; renderLive(); break;
     case "mode": setMode(el.dataset.v); break;
-    case "rewind": jumpTo(0); break;
+    case "rewind": if (L.playing) jumpTo(0); else { L.armed = null; L.sec = 0; renderLive(); } break;
     case "song": jumpSong(+el.dataset.i); break;
     case "prev-song": jumpSong(L.idx - 1); break;
     case "next-song": jumpSong(L.idx + 1); break;
