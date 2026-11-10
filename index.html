@@ -50,7 +50,7 @@ nav.tabs button[aria-current="page"] { background: var(--surface-3); color: var(
 .onair[aria-pressed="true"] { background: #E0322F; border-color: #FF6A63; color: #fff; box-shadow: 0 0 18px rgba(224, 50, 47, .55); }
 .onair[aria-pressed="true"] i { background: #fff; animation: onair 1.6s ease-in-out infinite; }
 @keyframes onair { 50% { opacity: .35; } }
-body.locked nav.tabs button:not([aria-current="page"]), body.locked .setside .sp-row:not(.active), body.locked #set-pick, body.locked [data-act="edit-live-song"] { opacity: .4; }
+body.locked nav.tabs button:not([aria-current="page"]), body.locked #set-pick, body.locked [data-act="edit-live-song"] { opacity: .4; }
 body.locked .live-main .now { border-color: #E0322F; box-shadow: 0 0 0 1px #E0322F; }
 .play.stop.holding { background-image: linear-gradient(90deg, #E0322F var(--hp, 0%), transparent var(--hp, 0%)); color: #fff; }
 @media (prefers-reduced-motion: reduce) { .onair[aria-pressed="true"] i { animation: none; } }
@@ -295,7 +295,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "21";
+const APP_VERSION = "22";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -997,14 +997,14 @@ function setMode(m) { setCfg({ mode: m }); if (L.pending) { L.pending.mode = m; 
 /* ---------- UI state ---------- */
 const UI = { lock: false, tab: "live", songId: null, setId: null, account: false, songQ: "", addQ: "" };
 /* LIVE lock: while on, only the sections, the timeline and the transport respond; «Parar» needs a long press. */
-const LOCK_OK = ["pad", "loop", "hold", "mode", "rewind", "next-song", "play", "close-sheet", "close-sheet-btn"];
+const LOCK_OK = ["pad", "loop", "hold", "mode", "rewind", "song", "prev-song", "next-song", "play", "close-sheet", "close-sheet-btn"];
 function setLock(on, quiet) {
   UI.lock = on; document.body.classList.toggle("locked", on);
   $("#onair").setAttribute("aria-pressed", String(on));
   try { localStorage.setItem("loopdirector-lock", on ? "1" : ""); } catch {}
   if (on && UI.tab !== "live") switchTab("live");
   if (on) { UI.account = false; $("#sheet-root").innerHTML = ""; }
-  if (!quiet) toast(on ? "LIVE: solo responden las secciones y el transporte. Para parar, mantén pulsado «Parar»." : "LIVE desactivado.");
+  if (!quiet) toast(on ? "LIVE: solo responden las secciones, las canciones y el transporte. Para parar, mantén pulsado «Parar»." : "LIVE desactivado.");
 }
 let holdTimer = null, holdFired = false;
 function holdStart(btn) {
