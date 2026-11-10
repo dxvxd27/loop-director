@@ -123,7 +123,8 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 .play.stop { background: var(--ink); color: var(--bg); }
 .play svg { width: 22px; height: 22px; }
 .transport .seg { align-self: center; }
-.transport .seg button { padding: 12px 14px; }
+.transport .seg button { padding: 12px 12px; }
+@media (max-width: 1100px) { .transport .seg button { padding: 12px 8px; font-size: 13px; } .play { max-width: 190px; } .tbtn { min-width: 60px; padding: 0 12px; } }
 
 .setside { min-height: 0; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
 .sp-head { padding: 10px 12px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
@@ -249,7 +250,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "6";
+const APP_VERSION = "7";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -666,6 +667,8 @@ function peekNext() {
   const to = q => (q.song != null && q.song !== L.idx ? { song: q.song, sec: q.sec } : { sec: q.sec });
   // "Con aviso": the bar after the tap announces the section (cue + "two, three, four"); the section starts the bar after.
   if (p && p.mode === "bar" && L.barNo + 1 >= (p.at || 0)) return { ...to(p), bar: 0, start: true, viaPending: true };
+  // "Siguiente compás": straight in on the next downbeat; the cue sounds on the next beat after the tap.
+  if (p && p.mode === "now") return { ...to(p), bar: 0, start: true, viaPending: true };
   if (L.bar + 1 < cur.bars) return { sec: L.sec, bar: L.bar + 1 };
   if (p && p.mode === "end") return { ...to(p), bar: 0, start: true, viaPending: true };
   if (L.loop) return { sec: L.sec, bar: 0, start: true, loop: true };
@@ -881,7 +884,8 @@ function renderLive() {
         <button class="play ${L.playing ? "stop" : ""}" data-act="play">${L.playing ? ICON_STOP + "Parar" : ICON_PLAY + "Tocar"}</button>
         <button class="tbtn loop" data-act="loop" aria-pressed="${L.loop}">${ICON_LOOP}Loop</button>
         <div class="seg" role="group" aria-label="Cuándo saltar">
-          <button data-act="mode" data-v="bar" aria-pressed="${c.mode === "bar"}">Con aviso (1 compás)</button>
+          <button data-act="mode" data-v="now" aria-pressed="${c.mode === "now"}">Siguiente compás</button>
+          <button data-act="mode" data-v="bar" aria-pressed="${c.mode === "bar"}">Con aviso</button>
           <button data-act="mode" data-v="end" aria-pressed="${c.mode === "end"}">Final de sección</button>
         </div>
       </div>
@@ -925,7 +929,7 @@ function paintLive(force) {
     });
     document.querySelectorAll(".sp-row").forEach(r => r.classList.toggle("queued", !!(L.pending && L.pending.song === +r.dataset.i)));
     const lb = $("[data-act=loop]"); if (lb) lb.setAttribute("aria-pressed", String(L.loop)); // a jump switches the loop off on its own
-    const st = $("#status"), mode = L.pending && L.pending.mode === "end" ? "al final de la sección" : "tras un compás de aviso";
+    const st = $("#status"), mode = !L.pending ? "" : L.pending.mode === "end" ? "al final de la sección" : L.pending.mode === "now" ? "en el siguiente compás" : "tras un compás de aviso";
     if (L.pending && L.pending.song != null) {
       const ns = songById(L.list[L.pending.song]);
       st.innerHTML = `<span class="tag">Siguiente</span> <b>${esc(ns ? ns.title : "")}</b> ${mode} · toca otra vez para cancelar`;
