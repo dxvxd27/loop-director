@@ -250,7 +250,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "7";
+const APP_VERSION = "8";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -296,17 +296,23 @@ function occurrence(song, i) {
   const s = song.sections[i];
   return song.sections.slice(0, i + 1).filter(x => x.kind === s.kind).length;
 }
+/* The number shown after the name: the one chosen in the editor (0 = none), or else automatic when the kind repeats. */
+function secNum(song, i) {
+  const s = song.sections[i];
+  if (s.n != null) return s.n;
+  return song.sections.filter(x => x.kind === s.kind).length > 1 ? occurrence(song, i) : 0;
+}
 function secLabel(song, i, short) {
   const s = song.sections[i];
   if (s.label && s.label.trim()) return short ? s.label.trim().slice(0, 4) : s.label.trim();
-  const kd = kindOf(s.kind);
-  const n = song.sections.filter(x => x.kind === s.kind).length > 1 ? occurrence(song, i) : 0;
+  const kd = kindOf(s.kind), n = secNum(song, i);
   return short ? kd.ab + (n || "") : kd.name + (n ? " " + n : "");
 }
-/* The second verse or chorus says "Verse 2" / "Chorus 2" when that cue exists; the rest say the plain name. */
+/* Verse 2 / Chorus 2 say "Verse 2" / "Chorus 2" when that cue exists; the rest say the plain name. */
 function cueKeyFor(song, i) {
   const s = song.sections[i]; if (!s || s.kind === "custom") return null;
-  if (occurrence(song, i) === 2 && cueSource(s.kind + "2")) return s.kind + "2";
+  const n = secNum(song, i);
+  if (n > 1 && cueSource(s.kind + n)) return s.kind + n;
   return s.kind;
 }
 function secParams(song, i) {
@@ -1043,6 +1049,9 @@ function renderSongs() {
           <div class="row quick">${[2, 4, 8, 16].map(n => `<button class="btn small" data-act="set-bars" data-n="${n}" aria-pressed="${s.bars === n}">${n}</button>`).join("")}</div>
         </div>
         <div class="add-chips">${KINDS.map(k => `<button data-act="set-kind" data-k="${k.k}" style="--c:${k.c}" aria-pressed="${k.k === s.kind}">${esc(k.name)}</button>`).join("")}</div>
+        ${s.kind === "custom" ? "" : `<div class="row quick"><span class="muted" style="margin-right:4px">Número</span>
+          ${[[0, "—"], [1, "1"], [2, "2"], [3, "3"], [4, "4"]].map(([n, t]) => `<button class="btn small" data-act="set-num" data-n="${n}" aria-pressed="${secNum(full, i) === n}" aria-label="${esc(kindOf(s.kind).name)} ${n || "sin número"}">${t}</button>`).join("")}
+          ${s.n != null ? `<button class="btn small" data-act="set-num" data-n="auto" style="border-style:dashed">Automático</button>` : ""}</div>`}
         <div class="row" style="align-items:end">
           <div class="field grow"><span class="label">Nombre (opcional)</span><input type="text" data-f="label" value="${esc(s.label || "")}" placeholder="${esc(secLabel({ ...full, sections: full.sections.map((x, j) => j === i ? { ...x, label: "" } : x) }, i))}"></div>
           <div class="field" style="width:96px"><span class="label">BPM</span><input type="number" inputmode="numeric" min="20" max="300" data-f="bpm" value="${s.bpm || ""}" placeholder="${num(song.bpm, 120)}"></div>
@@ -1243,6 +1252,7 @@ document.addEventListener("click", async e => {
     case "bars": editSong(s => { const x = s.sections[i]; x.bars = clamp((x.bars || 1) + +el.dataset.d, 1, 128); }); break;
     case "set-bars": editSong(s => { s.sections[i].bars = +el.dataset.n; }); break;
     case "set-kind": editSong(s => { s.sections[i].kind = el.dataset.k; }); break;
+    case "set-num": editSong(s => { if (el.dataset.n === "auto") delete s.sections[i].n; else s.sections[i].n = +el.dataset.n; }); break;
     case "sec-up": UI.selSec = i - 1; editSong(s => { const x = s.sections.splice(i, 1)[0]; s.sections.splice(i - 1, 0, x); }); break;
     case "sec-down": UI.selSec = i + 1; editSong(s => { const x = s.sections.splice(i, 1)[0]; s.sections.splice(i + 1, 0, x); }); break;
     case "sec-dup": UI.selSec = i + 1; editSong(s => { s.sections.splice(i + 1, 0, { ...s.sections[i], id: uid() }); }); break;
