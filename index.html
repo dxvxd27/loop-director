@@ -43,6 +43,19 @@ header.top { display: flex; align-items: center; gap: 16px; padding: 10px 0; fle
 nav.tabs { display: flex; gap: 4px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 3px; margin-right: auto; }
 nav.tabs button { border: 0; background: none; padding: 7px 14px; border-radius: 9px; font-weight: 600; font-size: 14px; color: var(--muted); }
 nav.tabs button[aria-current="page"] { background: var(--surface-3); color: var(--ink); }
+/* LIVE: an "on air" light. When on, the live screen only takes sections and transport, and «Parar» needs a long press. */
+.onair { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; font-family: var(--display); font-weight: 800; font-size: 17px; letter-spacing: .16em;
+  padding: 7px 16px 7px 13px; border-radius: 10px; border: 2px solid #6E2A2A; color: #C46A6A; background: transparent; }
+.onair i { width: 10px; height: 10px; border-radius: 50%; background: #5A2222; }
+.onair[aria-pressed="true"] { background: #E0322F; border-color: #FF6A63; color: #fff; box-shadow: 0 0 18px rgba(224, 50, 47, .55); }
+.onair[aria-pressed="true"] i { background: #fff; animation: onair 1.6s ease-in-out infinite; }
+@keyframes onair { 50% { opacity: .35; } }
+body.locked nav.tabs button:not([aria-current="page"]), body.locked .setside .sp-row:not(.active), body.locked #set-pick, body.locked [data-act="edit-live-song"] { opacity: .4; }
+body.locked .live-main .now { border-color: #E0322F; box-shadow: 0 0 0 1px #E0322F; }
+.play.stop.holding { background-image: linear-gradient(90deg, #E0322F var(--hp, 0%), transparent var(--hp, 0%)); color: #fff; }
+@media (prefers-reduced-motion: reduce) { .onair[aria-pressed="true"] i { animation: none; } }
+.tapbtn { flex: none; min-width: 56px; }
+.tapbtn.hit { background: var(--led); color: var(--led-ink); }
 .chip { font-size: 12px; font-weight: 600; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; background: var(--surface); }
 .chip.ok::before, .chip.local::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--ok); }
 .chip.local::before { background: var(--led); }
@@ -159,7 +172,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 .li .t { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .li .s { font-size: 12px; color: var(--muted); grid-column: 1 / -1; }
 .li.active { background: var(--surface-3); }
-.form-grid { display: grid; grid-template-columns: minmax(0, 1fr) 110px 90px 90px; gap: 10px; align-items: end; }
+.form-grid { display: grid; grid-template-columns: minmax(0, 1fr) 170px 90px 90px 90px; gap: 10px; align-items: end; }
 .secs { display: flex; flex-direction: column; gap: 6px; }
 .sec-head, .secrow { display: grid; grid-template-columns: 8px 150px minmax(0, 1fr) 132px 84px 74px auto; gap: 8px; align-items: center; }
 .sec-head { padding: 0 8px; }
@@ -270,6 +283,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
       <button data-tab="sets">Setlists</button>
       <button data-tab="settings">Ajustes</button>
     </nav>
+    <button id="onair" class="onair" aria-pressed="false" title="Bloqueo para el directo"><i></i>LIVE</button>
     <button id="sync" class="chip" data-act="account">Cargando…</button>
   </header>
   <main id="view"></main>
@@ -281,7 +295,7 @@ input[type=range] { width: 100%; accent-color: var(--led); }
 "use strict";
 
 // Shown in Ajustes to check which version a device is running. Keep it equal to VERSION in sw.js.
-const APP_VERSION = "20";
+const APP_VERSION = "21";
 
 /* ---------- Helpers ---------- */
 const $ = (s, r = document) => r.querySelector(s);
@@ -981,7 +995,31 @@ function announceAt(isSong) { return L.barNo + (isSong ? 1 : 2); } // a song cha
 function setMode(m) { setCfg({ mode: m }); if (L.pending) { L.pending.mode = m; if (m === "bar") L.pending.at = announceAt(L.pending.song != null); } }
 
 /* ---------- UI state ---------- */
-const UI = { tab: "live", songId: null, setId: null, account: false, songQ: "", addQ: "" };
+const UI = { lock: false, tab: "live", songId: null, setId: null, account: false, songQ: "", addQ: "" };
+/* LIVE lock: while on, only the sections, the timeline and the transport respond; «Parar» needs a long press. */
+const LOCK_OK = ["pad", "loop", "hold", "mode", "rewind", "next-song", "play", "close-sheet", "close-sheet-btn"];
+function setLock(on, quiet) {
+  UI.lock = on; document.body.classList.toggle("locked", on);
+  $("#onair").setAttribute("aria-pressed", String(on));
+  try { localStorage.setItem("loopdirector-lock", on ? "1" : ""); } catch {}
+  if (on && UI.tab !== "live") switchTab("live");
+  if (on) { UI.account = false; $("#sheet-root").innerHTML = ""; }
+  if (!quiet) toast(on ? "LIVE: solo responden las secciones y el transporte. Para parar, mantén pulsado «Parar»." : "LIVE desactivado.");
+}
+let holdTimer = null, holdFired = false;
+function holdStart(btn) {
+  const t0 = performance.now(); btn.classList.add("holding");
+  holdTimer = setInterval(() => {
+    const k = (performance.now() - t0) / 700; btn.style.setProperty("--hp", Math.min(100, k * 100) + "%");
+    if (k >= 1) { holdEnd(btn); holdFired = true; stop(false); }
+  }, 30);
+}
+function holdEnd(btn) { clearInterval(holdTimer); holdTimer = null; if (btn) { btn.classList.remove("holding"); btn.style.removeProperty("--hp"); } }
+document.addEventListener("pointerdown", e => {
+  const b = e.target.closest('[data-act="play"]');
+  if (b && UI.lock && L.playing && UI.tab === "live") { holdFired = false; holdStart(b); }
+});
+["pointerup", "pointercancel"].forEach(ev => document.addEventListener(ev, () => { if (holdTimer) holdEnd($('[data-act="play"].holding')); }));
 function switchTab(t) {
   UI.tab = t; $("#view").dataset.song = "";
   document.querySelectorAll("nav.tabs button").forEach(b => b.setAttribute("aria-current", b.dataset.tab === t ? "page" : "false"));
@@ -1019,7 +1057,7 @@ function renderLive() {
     const s = songById(id); if (!s) return "";
     const queued = L.pending && L.pending.song === i;
     return `<button class="sp-row ${i === L.idx ? "active" : ""} ${queued ? "queued" : ""}" data-act="song" data-i="${i}">
-      <span class="n">${i + 1}</span><span class="t">${esc(s.title || "Sin título")}</span><span class="s">${num(s.bpm, 120)}</span></button>`;
+      <span class="n">${i + 1}</span><span class="t">${esc(s.title || "Sin título")}</span><span class="s">${s.key ? esc(s.key) + " · " : ""}${num(s.bpm, 120)}</span></button>`;
   }).join("");
   const side = `<aside class="setside" aria-label="Setlist">
     <div class="sp-head"><span class="label">Setlist</span><select id="set-pick" aria-label="Elegir setlist">${setOpts}</select></div>
@@ -1053,7 +1091,7 @@ function renderLive() {
     <div class="live-main">
       <div class="now">
         <div style="min-width:0">
-          <div class="label">${sl ? esc(sl.name) + " · " : ""}Canción ${L.idx + 1} de ${L.list.length} · ${fmtDur(songSeconds(song))}</div>
+          <div class="label">${sl ? esc(sl.name) + " · " : ""}Canción ${L.idx + 1} de ${L.list.length} · ${fmtDur(songSeconds(song))}${song.key ? " · Tono " + esc(song.key) : ""}</div>
           <div class="song-title">${esc(song.title || "Sin título")}</div>
         </div>
         <div class="readouts">
@@ -1218,6 +1256,21 @@ function editSong(fn) {
   const copy = JSON.parse(JSON.stringify(s)); copy.sections = copy.sections || [];
   fn(copy); saveSong(copy);
 }
+const SONG_KEYS = ["C", "C#", "Db", "D", "Eb", "E", "F", "F#", "Gb", "G", "Ab", "A", "Bb", "B", "Cm", "C#m", "Dbm", "Dm", "Ebm", "Em", "Fm", "F#m", "Gbm", "Gm", "Abm", "Am", "Bbm", "Bm"];
+/* Tap tempo: tap along with the song; the tempo is the average of the last taps and is saved when you stop. */
+let taps = [], tapSave = null;
+function tapTempo(btn) {
+  const now = performance.now(), id = UI.songId;
+  if (taps.length && now - taps[taps.length - 1] > 2000) taps = [];
+  taps.push(now); taps = taps.slice(-8);
+  btn.classList.add("hit"); setTimeout(() => btn.classList.remove("hit"), 90);
+  if (taps.length < 2) { btn.textContent = "Tap…"; return; }
+  const bpm = clamp(Math.round(60000 * (taps.length - 1) / (taps[taps.length - 1] - taps[0])), 20, 300);
+  const inp = $('[data-sf="bpm"]'); if (inp) inp.value = bpm;
+  btn.textContent = bpm;
+  clearTimeout(tapSave);
+  tapSave = setTimeout(() => { taps = []; if (UI.songId === id) editSong(s => { s.bpm = bpm; }); }, 1600);
+}
 function renderSongs() {
   const v = $("#view");
   const q = UI.songQ.trim().toLowerCase();
@@ -1227,7 +1280,7 @@ function renderSongs() {
   if (!UI.songId || !songById(UI.songId)) UI.songId = list[0]?.id || null;
   const song = songById(UI.songId);
   const items = list.map(s => `<button class="li ${s.id === UI.songId ? "active" : ""}" data-act="pick-song" data-id="${esc(s.id)}">
-      <span class="t">${esc(s.title || "Sin título")}</span><span class="mono muted" style="font-size:12px">${num(s.bpm, 120)} · ${num(s.beats, 4)}/${num(s.unit, 4)}</span>
+      <span class="t">${esc(s.title || "Sin título")}</span><span class="mono muted" style="font-size:12px">${s.key ? esc(s.key) + " · " : ""}${num(s.bpm, 120)} · ${num(s.beats, 4)}/${num(s.unit, 4)}</span>
       <span class="s">${(s.sections || []).length} secciones · ${fmtDur(songSeconds({ ...s, sections: (s.sections || []).map(x => ({ ...x, bars: x.bars || 1 })) }))}</span></button>`).join("");
   let editor = `<div class="empty">Crea tu primera canción.</div>`;
   if (song) {
@@ -1305,7 +1358,8 @@ function renderSongs() {
     editor = `<div class="stack">
       <div class="form-grid" data-song>
         <div class="field"><span class="label">Título</span><input id="f-title" type="text" data-sf="title" value="${esc(song.title || "")}"></div>
-        <div class="field"><span class="label">Tempo (BPM)</span><input type="number" inputmode="numeric" min="20" max="300" data-sf="bpm" value="${num(song.bpm, 120)}"></div>
+        <div class="field"><span class="label">Tempo (BPM)</span><div class="row" style="gap:6px;flex-wrap:nowrap"><input type="number" inputmode="numeric" min="20" max="300" data-sf="bpm" value="${num(song.bpm, 120)}" style="min-width:0"><button class="btn tapbtn" type="button" data-act="tap" aria-label="Tap tempo: toca al ritmo">Tap</button></div></div>
+        <div class="field"><span class="label">Tono</span><select data-sf="key"><option value="">—</option>${SONG_KEYS.map(k => `<option value="${k}" ${k === song.key ? "selected" : ""}>${k}</option>`).join("")}</select></div>
         <div class="field"><span class="label">Tiempos</span><select data-sf="beats">${beatOpts(num(song.beats, 4))}</select></div>
         <div class="field"><span class="label">Figura</span><select data-sf="unit">${[2, 4, 8].map(u => `<option value="${u}" ${u === num(song.unit, 4) ? "selected" : ""}>${u}</option>`).join("")}</select></div>
       </div>
@@ -1319,7 +1373,7 @@ function renderSongs() {
       <p class="muted" style="margin:0;font-size:13px">Toca o arrastra la regla de los números para mover el cursor amarillo y escuchar desde ese compás. Arrastra el borde derecho de un bloque (‖) para darle más o menos compases. Cada rayita es un compás y las líneas gruesas marcan grupos de 4. Normalmente las intros y finales tienen 4 u 8 compases, y las estrofas y coros 8 o 16.</p>
       <div class="stack" style="gap:8px"><span class="label">Añadir sección al final</span><div class="add-chips">${chips}</div></div>
       ${insp}
-      <div class="row" style="justify-content:flex-end">${Store.church.owner ? `<button class="btn" data-act="copy-song">${song.church ? "Copiar a mis canciones" : "Copiar a la iglesia"}</button>` : ""}<button class="btn danger" data-act="del-song">Borrar canción</button></div>
+      <div class="row" style="justify-content:flex-end">${Store.church.owner ? `<button class="btn" data-act="copy-song">${song.church ? "Copiar a mis canciones" : "Copiar a la iglesia"}</button>` : ""}<button class="btn" data-act="dup-song">Duplicar canción</button><button class="btn danger" data-act="del-song">Borrar canción</button></div>
     </div>`;
   }
   // Keep where each panel was scrolled: every edit redraws the editor.
@@ -1361,7 +1415,7 @@ function renderSets() {
         <select data-it-auto aria-label="Al acabar la transición">${autoOpts(it.auto ?? null, true)}</select></div>`;
       return `${trans}<div class="set-item" data-i="${i}"><span class="n">${i + 1}</span>
         <div style="min-width:0"><div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s ? s.title : "Canción borrada")}</div>
-        <div class="muted mono" style="font-size:12px">${s ? `${num(s.bpm, 120)} BPM · ${(s.sections || []).length} secciones` : ""}</div></div>
+        <div class="muted mono" style="font-size:12px">${s ? `${s.key ? "Tono " + esc(s.key) + " · " : ""}${num(s.bpm, 120)} BPM · ${(s.sections || []).length} secciones` : ""}</div></div>
         <div class="ctr"><button class="icon-btn" data-act="it-up" ${i === 0 ? "disabled" : ""} aria-label="Subir">↑</button><button class="icon-btn" data-act="it-down" ${i === its.length - 1 ? "disabled" : ""} aria-label="Bajar">↓</button><button class="icon-btn" data-act="it-del" aria-label="Quitar">✕</button></div></div>`;
     }).join("");
     const q = UI.addQ.trim().toLowerCase();
@@ -1546,9 +1600,14 @@ function cueKeyFromName(name) {
 }
 document.addEventListener("pointerdown", () => warmAudio(), { capture: true, passive: true });
 document.addEventListener("click", async e => {
-  const tab = e.target.closest("nav.tabs button"); if (tab) { switchTab(tab.dataset.tab); return; }
+  if (e.target.closest("#onair")) { setLock(!UI.lock); return; }
+  const tab = e.target.closest("nav.tabs button");
+  if (tab) { if (UI.lock && tab.dataset.tab !== "live") toast("Quita LIVE para salir de Directo."); else switchTab(tab.dataset.tab); return; }
   const el = e.target.closest("[data-act]"); if (!el) return;
   const a = el.dataset.act;
+  if (UI.lock && UI.tab === "live" && !LOCK_OK.includes(a)) { toast("Bloqueado por LIVE. Toca LIVE para quitarlo."); return; }
+  if (a === "play" && holdFired) { holdFired = false; return; } // the long press already stopped it
+  if (a === "play" && UI.lock && L.playing) { toast("Mantén pulsado «Parar» para parar."); return; }
   if (a === "close-sheet" && e.target !== el) return;
   const row = el.closest("[data-i]"), i = row ? +row.dataset.i : -1;
   switch (a) {
@@ -1572,6 +1631,14 @@ document.addEventListener("click", async e => {
     case "next-song": jumpSong(L.idx + 1); break;
     // songs
     case "new-song": newSong(); break;
+    case "tap": tapTempo(el); break;
+    case "dup-song": {
+      const s = songById(UI.songId); if (!s) break;
+      const { id: _i, church: _c, ...data } = JSON.parse(JSON.stringify(s));
+      data.title = (data.title || "Sin título") + " (copia)";
+      const id = (s.church ? "ch:" : "") + uid();
+      Store.put("songs", id, data); UI.songId = id; UI.selSec = 0; renderSongs(); toast("Canción duplicada."); break;
+    }
     case "import-pulso": importPulso(el); break;
     case "edit-live-song": UI.songId = L.list[L.idx]; switchTab("songs"); break;
     case "pick-song": UI.songId = el.dataset.id; UI.selSec = 0; renderSongs(); break;
@@ -1623,9 +1690,11 @@ document.addEventListener("click", async e => {
 });
 document.addEventListener("change", async e => {
   const t = e.target;
+  if (t.id === "set-pick" && UI.lock) { toast("Bloqueado por LIVE. Toca LIVE para quitarlo."); t.value = L.setId || ""; return; }
   if (t.id === "set-pick") { if (L.playing) { toast("Para el clic antes de cambiar de setlist."); t.value = L.setId || ""; return; } chooseSet(t.value); renderLive(); return; }
   if (t.dataset.sf) {
     const f = t.dataset.sf;
+    if (f === "key") { editSong(s => { if (t.value) s.key = t.value; else delete s.key; }); return; }
     editSong(s => { s[f] = f === "title" ? t.value.trim() || "Sin título" : clamp(num(t.value, f === "bpm" ? 120 : 4), f === "bpm" ? 20 : 1, f === "bpm" ? 300 : 16); });
     return;
   }
@@ -1698,7 +1767,7 @@ document.addEventListener("submit", async e => {
 document.addEventListener("keydown", e => {
   if (UI.tab !== "live" || /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName || "")) return;
   const cur = L.playing && L.ev ? L.ev.sec : L.sec;
-  if (e.key === " ") { e.preventDefault(); warmAudio(); if (L.playing) stop(false); else start(); }
+  if (e.key === " ") { e.preventDefault(); warmAudio(); if (L.playing) { if (UI.lock) toast("Con LIVE, mantén pulsado «Parar» para parar."); else stop(false); } else start(); }
   else if (e.key === "l" || e.key === "L") toggleLoop();
   else if (/^[1-9]$/.test(e.key)) jumpTo(+e.key - 1);
   else if (e.key === "ArrowRight" || e.key === "PageDown") { e.preventDefault(); jumpTo((L.pending && L.pending.song == null ? L.pending.sec : cur) + 1); }
@@ -1725,6 +1794,7 @@ Store.onChange(what => {
 try { const s = JSON.parse(localStorage.getItem("loopdirector-live") || "{}"); L.setId = s.setId || null; Store.load(); chooseSet(L.setId, s.songId); } catch {}
 Store.init();
 render();
+try { if (localStorage.getItem("loopdirector-lock")) setLock(true, true); } catch {}
 requestAnimationFrame(frame);
 if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
 })();
